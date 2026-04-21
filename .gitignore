@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+dist/
+packages/cli/src/vgrep.exe
+*.tsbuildinfo
+
+
+# SST
+.sst/
+
+# vgrep runtime data (per-project, not in monorepo)
+.vgrep/
+dev/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Bun
+bun.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

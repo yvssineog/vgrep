@@ -1,0 +1,21 @@
+{
+  "name": "vgrep",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "bun sst dev",
+    "test": "bun test --recursive",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/bun": "latest",
+    "sst": "latest"
+  },
+  "dependencies": {
+    "@types/aws-lambda": "^8.10.161",
+    "aws-lambda": "^1.0.7"
+  }
+}

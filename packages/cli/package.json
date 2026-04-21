@@ -1,0 +1,21 @@
+{
+  "name": "@vgrep/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "vgrep": "./src/cli.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/cli.ts",
+    "test": "bun test",
+    "build": "bun build --compile ./src/cli.ts --outfile vgrep",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@vgrep/core": "workspace:*",
+    "commander": "^13.0.0",
+    "chalk": "^5.4.0",
+    "ora": "^8.2.0"
+  }
+}
