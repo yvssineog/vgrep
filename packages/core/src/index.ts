@@ -19,3 +19,7 @@ export { diffTrees } from "./merkle/diff";
 
 // Simhash
 export { computeSimhash, hammingDistance } from "./simhash/simhash";
+
+// Chunking
+export { chunkFile, initTreeSitter } from "./chunking/chunker";
+export { detectLanguage, hasGrammar } from "./chunking/languages";
