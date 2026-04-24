@@ -1,108 +1,82 @@
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { join, posix } from "node:path";
 import type { MerkleNode, TreeStats } from "../types";
 
-/** File name for the user-defined ignore list (like .gitignore). */
+/** File name for the user-defined ignore list. */
 const VGREPIGNORE_FILE = ".vgrepignore";
 
-/**
- * Default ignore patterns — always excluded, even without a .vgrepignore file.
- */
-const DEFAULT_IGNORE = new Set([
-  "node_modules",
-  ".git",
-  ".vgrep",
-  ".next",
-  ".turbo",
-  "dist",
-  "build",
-  "coverage",
-  ".DS_Store",
-  "bun.lock",
-  "package-lock.json",
-  "yarn.lock",
-  "pnpm-lock.yaml",
-]);
-
-/**
- * Parse a .vgrepignore file into two buckets:
- *   - exactNames: simple names with no wildcards (e.g. "tmp", ".env")
- *   - globPatterns: patterns containing wildcards (e.g. "*.log", "**\/*.test.ts")
- *
- * Syntax rules (same conventions as .gitignore):
- *   - Empty lines and lines starting with `#` are ignored.
- *   - Trailing `/` marks a directory-only pattern (stripped before matching).
- *   - All other lines are matched against both the entry's base name
- *     and its relative path from the project root.
- */
-function parseIgnoreFile(content: string): {
+interface IgnoreRules {
   exactNames: Set<string>;
   globPatterns: Bun.Glob[];
-} {
+}
+
+/**
+ * Parse ignore patterns into two simple matching buckets.
+ *
+ * Plain names like `node_modules/` or `.env` become exact names.
+ * Patterns with glob metacharacters like `*.log` become Bun.Glob matchers.
+ */
+function parseIgnorePatterns(patterns: Iterable<string>): IgnoreRules {
   const exactNames = new Set<string>();
   const globPatterns: Bun.Glob[] = [];
 
-  for (const raw of content.split("\n")) {
+  for (const raw of patterns) {
     const line = raw.trim();
-
-    // Skip empty lines and comments
     if (!line || line.startsWith("#")) continue;
 
-    // Strip trailing slash (directory marker — we ignore dirs and files alike)
     const pattern = line.endsWith("/") ? line.slice(0, -1) : line;
 
-    // If the pattern contains glob metacharacters → compile to Bun.Glob
     if (/[*?{}\[\]]/.test(pattern)) {
       globPatterns.push(new Bun.Glob(pattern));
     } else {
-      exactNames.add(pattern);
+      exactNames.add(normalizeRelativePath(pattern));
     }
   }
 
   return { exactNames, globPatterns };
 }
 
+function mergeIgnoreRules(target: IgnoreRules, source: IgnoreRules): void {
+  for (const name of source.exactNames) {
+    target.exactNames.add(name);
+  }
+  target.globPatterns.push(...source.globPatterns);
+}
+
+function normalizeRelativePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
 /**
- * Builds a Merkle tree from a directory on disk.
+ * Builds a Merkle tree from indexed files.
  *
- * Each file node's hash is SHA-256(file content).
- * Each directory node's hash is SHA-256(sorted child hashes joined by newline).
+ * Ignore rules are accumulated from two places:
+ * 1. extraIgnorePatterns: optional caller-provided patterns for tests/tools.
+ * 2. .vgrepignore: project-level user config parsed on build().
  *
- * Ignore rules are resolved in order:
- *   1. DEFAULT_IGNORE — hardcoded names always excluded.
- *   2. .vgrepignore  — project-level ignore file (parsed on build()).
- *   3. additionalIgnores — programmatic overrides passed to the constructor.
+ * The CLI creates a default .vgrepignore during `vgrep init`; the core tree
+ * builder only applies ignore rules it is explicitly given or can read there.
  *
- * Uses Bun.file() for zero-copy file reads — significantly faster than
- * Node's fs.readFile() thanks to Bun's optimized I/O pipeline.
- *
- * The tree is built fully asynchronously with concurrent I/O.
+ * File discovery uses Bun.Glob, file reads use Bun.file(), and hashing uses
+ * Bun.CryptoHasher. Empty directories are not represented because they do not
+ * affect the content index.
  */
 export class MerkleTree {
   private root: MerkleNode | null = null;
-
-  /** Exact-name ignores (DEFAULT_IGNORE + .vgrepignore simple names + additionalIgnores). */
-  private exactIgnores: Set<string>;
-
-  /** Glob-based ignores from .vgrepignore (e.g. "*.log", "docs/**"). */
-  private globIgnores: Bun.Glob[] = [];
+  private ignoreRules: IgnoreRules;
 
   constructor(
     private readonly rootDir: string,
-    additionalIgnores: string[] = [],
+    extraIgnorePatterns: string[] = [],
   ) {
-    this.exactIgnores = new Set([...DEFAULT_IGNORE, ...additionalIgnores]);
+    this.ignoreRules = parseIgnorePatterns(extraIgnorePatterns);
   }
 
   /**
-   * Build the Merkle tree by recursively walking the file system.
-   * Loads .vgrepignore from the project root before walking.
-   * Returns the root MerkleNode.
+   * Build the Merkle tree and return its root node.
    */
   async build(): Promise<MerkleNode> {
     await this.loadVgrepignore();
-    this.root = await this.walkDir(this.rootDir, ".");
+    this.root = await this.buildFromFiles();
     return this.root;
   }
 
@@ -165,111 +139,72 @@ export class MerkleTree {
     return hashes;
   }
 
-  // ─── Private helpers ───────────────────────────────────────────
-
-  /**
-   * Load and parse .vgrepignore from the project root (if it exists).
-   */
   private async loadVgrepignore(): Promise<void> {
     const ignoreFile = Bun.file(join(this.rootDir, VGREPIGNORE_FILE));
-
     if (!(await ignoreFile.exists())) return;
 
     const content = await ignoreFile.text();
-    const { exactNames, globPatterns } = parseIgnoreFile(content);
-
-    // Merge into the existing ignore sets
-    for (const name of exactNames) {
-      this.exactIgnores.add(name);
-    }
-    this.globIgnores = globPatterns;
+    mergeIgnoreRules(this.ignoreRules, parseIgnorePatterns(content.split("\n")));
   }
 
-  /**
-   * Check whether a file or directory should be ignored.
-   *
-   * @param name         - Base name of the entry (e.g. "utils.ts")
-   * @param relativePath - Path relative to the project root (e.g. "src/utils.ts")
-   */
-  private isIgnored(name: string, relativePath: string): boolean {
-    // 1. Exact name match (fastest path)
-    if (this.exactIgnores.has(name)) return true;
+  private isIgnored(relativePath: string): boolean {
+    const normalizedPath = normalizeRelativePath(relativePath);
+    const name = posix.basename(normalizedPath);
+    const segments = normalizedPath.split("/");
 
-    // 2. Glob pattern match against both base name and relative path
-    for (const glob of this.globIgnores) {
-      if (glob.match(name) || glob.match(relativePath)) return true;
+    if (
+      this.ignoreRules.exactNames.has(name) ||
+      this.ignoreRules.exactNames.has(normalizedPath) ||
+      segments.some((segment) => this.ignoreRules.exactNames.has(segment))
+    ) {
+      return true;
+    }
+
+    for (const glob of this.ignoreRules.globPatterns) {
+      if (glob.match(name) || glob.match(normalizedPath)) return true;
     }
 
     return false;
   }
 
-  /**
-   * Walk a directory recursively, building MerkleNode tree.
-   */
-  private async walkDir(
-    absolutePath: string,
-    relativePath: string,
-  ): Promise<MerkleNode> {
-    const entries = await readdir(absolutePath, { withFileTypes: true });
+  private async buildFromFiles(): Promise<MerkleNode> {
+    const glob = new Bun.Glob("**/*");
+    const filePaths: string[] = [];
 
-    // Filter out ignored entries
-    const filtered = entries.filter((entry) => {
-      const childRelative =
-        relativePath === "." ? entry.name : join(relativePath, entry.name);
-      return !this.isIgnored(entry.name, childRelative);
-    });
-
-    // Process children concurrently
-    const childPromises = filtered.map(async (entry) => {
-      const childAbsolute = join(absolutePath, entry.name);
-      const childRelative =
-        relativePath === "." ? entry.name : join(relativePath, entry.name);
-
-      if (entry.isDirectory()) {
-        return this.walkDir(childAbsolute, childRelative);
+    for await (const path of glob.scan({
+      cwd: this.rootDir,
+      dot: true,
+      onlyFiles: true,
+    })) {
+      const relativePath = normalizeRelativePath(path);
+      if (!this.isIgnored(relativePath)) {
+        filePaths.push(relativePath);
       }
+    }
 
-      if (entry.isFile()) {
-        return this.hashFile(childAbsolute, childRelative);
-      }
+    filePaths.sort((a, b) => a.localeCompare(b));
 
-      // Skip symlinks, sockets, etc.
-      return null;
-    });
-
-    const children = (await Promise.all(childPromises)).filter(
-      (c): c is MerkleNode => c !== null,
+    const fileNodes = await Promise.all(
+      filePaths.map((relativePath) => this.hashFile(relativePath)),
     );
 
-    // Sort children deterministically by path
-    children.sort((a, b) => a.path.localeCompare(b.path));
+    const directoryChildren = new Map<string, MerkleNode[]>();
+    directoryChildren.set(".", []);
 
-    // Directory hash = SHA-256 of sorted child hashes
-    const dirHash = createHash("sha256")
-      .update(children.map((c) => c.hash).join("\n"))
-      .digest("hex");
+    for (const fileNode of fileNodes) {
+      const dirPath = posix.dirname(fileNode.path);
+      this.ensureDirectoryPath(directoryChildren, dirPath);
+      directoryChildren.get(dirPath)!.push(fileNode);
+    }
 
-    return {
-      path: relativePath,
-      type: "directory",
-      hash: dirHash,
-      children,
-    };
+    return this.buildDirectoryNode(".", directoryChildren);
   }
 
-  /**
-   * Hash a single file using Bun.file() — zero-copy optimized I/O.
-   * Avoids Node's fs.readFile() + fs.stat() double syscall overhead.
-   */
-  private async hashFile(
-    absolutePath: string,
-    relativePath: string,
-  ): Promise<MerkleNode> {
+  private async hashFile(relativePath: string): Promise<MerkleNode> {
+    const absolutePath = join(this.rootDir, ...relativePath.split("/"));
     const file = Bun.file(absolutePath);
-
-    // Bun.file().bytes() is the fastest path — zero-copy Uint8Array
     const content = await file.bytes();
-    const hash = createHash("sha256").update(content).digest("hex");
+    const hash = Bun.CryptoHasher.hash("sha256", content, "hex");
 
     return {
       path: relativePath,
@@ -277,6 +212,55 @@ export class MerkleTree {
       hash,
       size: file.size,
       mtime: file.lastModified,
+    };
+  }
+
+  private ensureDirectoryPath(
+    directoryChildren: Map<string, MerkleNode[]>,
+    dirPath: string,
+  ): void {
+    if (directoryChildren.has(dirPath)) return;
+
+    const parentPath = posix.dirname(dirPath);
+    this.ensureDirectoryPath(directoryChildren, parentPath);
+
+    const directoryNode: MerkleNode = {
+      path: dirPath,
+      type: "directory",
+      hash: "",
+      children: [],
+    };
+
+    directoryChildren.set(dirPath, directoryNode.children!);
+    directoryChildren.get(parentPath)!.push(directoryNode);
+  }
+
+  private buildDirectoryNode(
+    path: string,
+    directoryChildren: Map<string, MerkleNode[]>,
+  ): MerkleNode {
+    const children = directoryChildren.get(path) ?? [];
+
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      if (child.type === "directory") {
+        children[i] = this.buildDirectoryNode(child.path, directoryChildren);
+      }
+    }
+
+    children.sort((a, b) => a.path.localeCompare(b.path));
+
+    const hash = Bun.CryptoHasher.hash(
+      "sha256",
+      children.map((child) => child.hash).join("\n"),
+      "hex",
+    );
+
+    return {
+      path,
+      type: "directory",
+      hash,
+      children,
     };
   }
 }

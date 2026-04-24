@@ -25,11 +25,11 @@ vgrep search "authenticate user"     # ✅ finds all of the above
 
 ### Key Features
 
-- 🏠 **Local-First** — Runs 100% on your machine by default. Your code never leaves your computer.
-- ⚡ **Blazing Fast** — Built on [Bun](https://bun.sh), compiled to a single standalone binary. Indexing uses SHA-256 Merkle trees for incremental updates, only re-indexes what changed.
-- 🔍 **Semantic Search** — Powered by `all-MiniLM-L6-v2` embeddings running locally via `@xenova/transformers`. No API keys needed.
-- 🌲 **Smart Diffing** — Merkle tree + simhash fingerprinting means re-indexing is near-instant for small changes.
-- ☁️ **Optional Cloud Sync** — Share indexes across your team via a serverless AWS backend (SST v3). Zero-ops deployment.
+- **Local-First** — Runs 100% on your machine by default. Your code never leaves your computer.
+- **Blazing Fast** — Built on [Bun](https://bun.sh), compiled to a single standalone binary. Indexing uses SHA-256 Merkle trees for incremental updates, only re-indexes what changed.
+- **Semantic Search** — Powered by `all-MiniLM-L6-v2` embeddings running locally via `@xenova/transformers`. No API keys needed.
+- **Smart Diffing** — Merkle tree + simhash fingerprinting means re-indexing is near-instant for small changes.
+- **Optional Cloud Sync** — Share indexes across your team via a serverless AWS backend (SST v3). Zero-ops deployment.
 
 ## Quick Start
 
@@ -151,7 +151,7 @@ Built-in defaults (always ignored): `node_modules/`, `.git/`, `.vgrep/`, `dist/`
 
 ## Cloud Mode
 
-> 🚧 **Coming Soon** — Cloud Mode is not yet implemented.
+> **Coming Soon** — Cloud Mode is not yet implemented.
 
 Cloud Mode enables team-wide index sharing via a serverless AWS backend built with [SST v3](https://sst.dev).
 

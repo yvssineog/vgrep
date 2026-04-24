@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 /**
  * Compute a 64-bit Simhash from a collection of file content hashes.
  *
@@ -79,6 +77,6 @@ export function hammingDistance(a: string, b: string): number {
  * by taking the first 8 bytes of SHA-256.
  */
 function hash64(input: string): Uint8Array {
-  const full = createHash("sha256").update(input).digest();
+  const full = Bun.CryptoHasher.hash("sha256", input);
   return new Uint8Array(full.buffer, full.byteOffset, 8);
 }

@@ -91,8 +91,8 @@ describe("MerkleTree", () => {
     }
   });
 
-  test("should ignore specified directories", async () => {
-    // Create a node_modules dir (should be ignored by default)
+  test("should ignore directories listed in .vgrepignore", async () => {
+    await writeFile(join(tempDir, ".vgrepignore"), "node_modules/\n");
     await mkdir(join(tempDir, "node_modules"), { recursive: true });
     await writeFile(
       join(tempDir, "node_modules", "dep"),
@@ -101,13 +101,24 @@ describe("MerkleTree", () => {
 
     const tree = new MerkleTree(tempDir);
     await tree.build();
-    const stats = tree.getStats();
+    const root = tree.getRoot();
 
-    // node_modules should be ignored
-    expect(stats.totalFiles).toBe(5);
+    const filePaths: string[] = [];
+    const walk = (node: typeof root): void => {
+      if (node.type === "file") {
+        filePaths.push(node.path);
+      } else {
+        node.children?.forEach(walk);
+      }
+    };
+    walk(root);
+
+    expect(filePaths).not.toContain("node_modules/dep");
+    expect(filePaths).toContain(".vgrepignore");
 
     // Clean up
     await rm(join(tempDir, "node_modules"), { recursive: true, force: true });
+    await rm(join(tempDir, ".vgrepignore"), { force: true });
   });
 
   test("should change root hash when a file changes", async () => {
