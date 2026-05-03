@@ -163,24 +163,15 @@ export async function initCommand(options: {
     .filter((change) => change.type !== "deleted")
     .map((change) => change.path);
 
-  const limit = pLimit(4);
+  const limit = pLimit(8);
   const chunkStartTime = performance.now();
-  let chunkStartedFiles = 0;
   let chunkedFiles = 0;
   const chunkGroups = await Promise.all(
     filesToIndex.map((filePath) =>
       limit(async () => {
-        chunkStartedFiles += 1;
-        indexSpinner.text = formatIndexProgress(
-          "Reading + chunking",
-          chunkStartedFiles,
-          filesToIndex.length,
-          filePath,
-        );
         const absolutePath = join(projectRoot, ...filePath.split("/"));
-        const file = Bun.file(absolutePath);
-        const content = await file.text();
-        const chunks = chunkFile(filePath, content);
+        const content = await Bun.file(absolutePath).text();
+        const chunks = await chunkFile(filePath, content);
         chunkedFiles += 1;
         indexSpinner.text = formatIndexProgress(
           "Chunked",
@@ -196,30 +187,8 @@ export async function initCommand(options: {
 
   const chunks = chunkGroups.flat();
   const embedStartTime = performance.now();
-  let embedStartedChunks = 0;
-  let embeddedChunks = 0;
-  const entries = await Promise.all(
-    chunks.map((chunk) =>
-      limit(async () => {
-        embedStartedChunks += 1;
-        indexSpinner.text = formatIndexProgress(
-          "Embedding/cache",
-          embedStartedChunks,
-          chunks.length,
-          chunk.filePath,
-        );
-        const entry = await engine.embedChunk(chunk);
-        embeddedChunks += 1;
-        indexSpinner.text = formatIndexProgress(
-          "Embedded/cached",
-          embeddedChunks,
-          chunks.length,
-          chunk.filePath,
-        );
-        return entry;
-      }),
-    ),
-  );
+  indexSpinner.text = `Embedding ${chunks.length} chunk(s) locally...`;
+  const entries = await engine.embedChunks(chunks);
   const embedElapsed = performance.now() - embedStartTime;
 
   const upsertStartTime = performance.now();

@@ -32,11 +32,11 @@ export {
 
 // Embeddings
 export { EmbeddingCache } from "./embedding/cache";
+export { CachedEmbedder, type EmbeddingModel } from "./embedding/embedder";
 export {
-  CachedEmbedder,
-  TransformersEmbedder,
-  type Embedder,
-} from "./embedding/embedder";
+  transformersEmbedding,
+  type TransformersEmbeddingOptions,
+} from "./embedding/transformers";
 
 // Vector engines
 export { LocalEngine } from "./engine/local-engine";

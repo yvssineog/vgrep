@@ -13,8 +13,9 @@
     "fast-glob": "^3.3.0",
     "web-tree-sitter": "0.24.0",
     "tree-sitter-wasms": "^0.1.11",
-    "@huggingface/transformers": "^3.3.3",
     "@lancedb/lancedb": "^0.13.0",
-    "p-limit": "^6.1.0"
+    "@ai-sdk/provider": "^2.0.0",
+    "ai": "^5.0.0",
+    "@huggingface/transformers": "^3.3.3"
   }
 }

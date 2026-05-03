@@ -3,14 +3,16 @@ import * as lancedb from "@lancedb/lancedb";
 import type { Connection, Table } from "@lancedb/lancedb";
 import type { CodeChunk, IndexEntry, SearchResult } from "../types";
 import type { VectorEngine } from "./interface";
-import { CachedEmbedder, type Embedder } from "../embedding/embedder";
+import { CachedEmbedder, type EmbeddingModel } from "../embedding/embedder";
+import { transformersEmbedding } from "../embedding/transformers";
 
 const TABLE_NAME = "embeddings";
 
 export interface LocalEngineOptions {
   dbPath: string;
   cacheDir: string;
-  embedder?: Embedder;
+  /** AI SDK embedding model. Defaults to local in-process MiniLM-L6-v2. */
+  embeddingModel?: EmbeddingModel;
 }
 
 interface LanceRow {
@@ -32,7 +34,7 @@ export class LocalEngine implements VectorEngine {
   constructor(private readonly options: LocalEngineOptions) {
     this.cachedEmbedder = new CachedEmbedder(
       options.cacheDir,
-      options.embedder,
+      options.embeddingModel ?? transformersEmbedding(),
     );
   }
 
@@ -88,12 +90,8 @@ export class LocalEngine implements VectorEngine {
     return (await table.countRows()) > 0;
   }
 
-  async embedChunk(chunk: CodeChunk): Promise<IndexEntry> {
-    return this.cachedEmbedder.embedChunk(chunk);
-  }
-
   async embedChunks(chunks: CodeChunk[]): Promise<IndexEntry[]> {
-    return Promise.all(chunks.map((chunk) => this.embedChunk(chunk)));
+    return this.cachedEmbedder.embedChunks(chunks);
   }
 
   private async getConnection(): Promise<Connection> {

@@ -1,14 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
+import type { EmbeddingModelV2 } from "@ai-sdk/provider";
 import { LocalEngine } from "./local-engine";
-import type { Embedder } from "../embedding/embedder";
 
-class StaticEmbedder implements Embedder {
-  async embed(): Promise<number[]> {
-    return [1, 0, 0];
-  }
-}
+const staticModel: EmbeddingModelV2<string> = {
+  specificationVersion: "v2",
+  provider: "test",
+  modelId: "static",
+  maxEmbeddingsPerCall: 100,
+  supportsParallelCalls: true,
+  async doEmbed({ values }) {
+    return { embeddings: values.map(() => [1, 0, 0]) };
+  },
+};
 
 describe("LocalEngine", () => {
   test("upsert inserts searchable rows", async () => {
@@ -16,7 +21,7 @@ describe("LocalEngine", () => {
     const engine = new LocalEngine({
       dbPath: join(dir, "lancedb"),
       cacheDir: join(dir, "cache"),
-      embedder: new StaticEmbedder(),
+      embeddingModel: staticModel,
     });
 
     try {
@@ -56,7 +61,7 @@ describe("LocalEngine", () => {
     const engine = new LocalEngine({
       dbPath: join(dir, "lancedb"),
       cacheDir: join(dir, "cache"),
-      embedder: new StaticEmbedder(),
+      embeddingModel: staticModel,
     });
 
     try {
@@ -95,7 +100,7 @@ describe("LocalEngine", () => {
     const engine = new LocalEngine({
       dbPath: join(dir, "lancedb"),
       cacheDir: join(dir, "cache"),
-      embedder: new StaticEmbedder(),
+      embeddingModel: staticModel,
     });
 
     try {

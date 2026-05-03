@@ -17,7 +17,7 @@
       "ESNext"
     ],
     "types": [
-      "bun-types"
+      "bun"
     ],
     "baseUrl": ".",
     "paths": {
