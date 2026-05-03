@@ -53,8 +53,8 @@ describe("diffTrees", () => {
     const changes = diffTrees(root1, root2);
 
     expect(changes.length).toBe(1);
-    expect(changes[0].path).toBe("a.ts");
-    expect(changes[0].type).toBe("modified");
+    expect(changes[0]!.path).toBe("a.ts");
+    expect(changes[0]!.type).toBe("modified");
 
     // Restore
     await writeFile(join(tempDir, "a.ts"), "const a = 1;");
@@ -73,8 +73,8 @@ describe("diffTrees", () => {
     const changes = diffTrees(root1, root2);
 
     expect(changes.length).toBe(1);
-    expect(changes[0].path).toBe("d.ts");
-    expect(changes[0].type).toBe("added");
+    expect(changes[0]!.path).toBe("d.ts");
+    expect(changes[0]!.type).toBe("added");
 
     // Clean up
     const { unlink } = await import("node:fs/promises");
@@ -97,8 +97,8 @@ describe("diffTrees", () => {
     const changes = diffTrees(root1, root2);
 
     expect(changes.length).toBe(1);
-    expect(changes[0].path).toBe("temp.ts");
-    expect(changes[0].type).toBe("deleted");
+    expect(changes[0]!.path).toBe("temp.ts");
+    expect(changes[0]!.type).toBe("deleted");
   });
 
   test("should only descend into changed directories", async () => {
@@ -115,8 +115,8 @@ describe("diffTrees", () => {
 
     // Only sub/c.ts should be reported as changed
     expect(changes.length).toBe(1);
-    expect(changes[0].path).toContain("c.ts");
-    expect(changes[0].type).toBe("modified");
+    expect(changes[0]!.path).toContain("c.ts");
+    expect(changes[0]!.type).toBe("modified");
 
     // Restore
     await writeFile(join(tempDir, "sub", "c.ts"), "const c = 3;");

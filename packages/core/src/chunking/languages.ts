@@ -10,6 +10,7 @@
 
 import Parser from "web-tree-sitter";
 import { join, dirname } from "node:path";
+import type { FileProfile } from "../types";
 
 // ─── Extension → Language mapping ──────────────────────────────
 
@@ -62,6 +63,49 @@ const EXTENSION_MAP: Record<string, string> = {
   zsh: "bash",
 };
 
+export const DEFAULT_FILE_PROFILES: Record<string, FileProfile> = {
+  code: {
+    description: "Programming language source files and code-adjacent build/query files.",
+    extensions: [
+      ...Object.keys(EXTENSION_MAP),
+      "sql",
+      "graphql",
+      "gql",
+      "proto",
+      "gradle",
+      "dockerfile",
+    ],
+    filenames: ["dockerfile", "makefile", "rakefile", "gemfile"],
+  },
+  docs: {
+    description: "Documentation and prose files.",
+    extensions: ["md", "mdx", "txt", "rst", "adoc"],
+    filenames: ["readme", "license", "changelog"],
+  },
+  data: {
+    description: "Structured data and configuration files.",
+    extensions: [
+      "json",
+      "jsonc",
+      "yaml",
+      "yml",
+      "toml",
+      "xml",
+      "csv",
+      "tsv",
+      "properties",
+      "ini",
+      "env",
+    ],
+    filenames: [],
+  },
+  styles: {
+    description: "Stylesheets and UI styling files.",
+    extensions: ["css", "scss", "sass", "less", "pcss"],
+    filenames: [],
+  },
+};
+
 /**
  * Detect language from a file path by extension.
  * Returns `undefined` for unknown extensions.
@@ -70,6 +114,46 @@ export function detectLanguage(filePath: string): string | undefined {
   const ext = filePath.split(".").pop()?.toLowerCase();
   return ext ? EXTENSION_MAP[ext] : undefined;
 }
+
+/**
+ * Return whether a file should be indexed with the default code profile.
+ */
+export function isIndexableTextFile(filePath: string): boolean {
+  return createIndexableFileMatcher(["code"], DEFAULT_FILE_PROFILES)(filePath);
+}
+
+export function createIndexableFileMatcher(
+  profileNames: string[],
+  profiles: Record<string, FileProfile>,
+): (filePath: string) => boolean {
+  const extensions = new Set<string>();
+  const filenames = new Set<string>();
+
+  for (const profileName of profileNames) {
+    const profile = profiles[profileName];
+    if (!profile) continue;
+
+    for (const extension of profile.extensions) {
+      extensions.add(normalizeExtension(extension));
+    }
+    for (const filename of profile.filenames ?? []) {
+      filenames.add(filename.toLowerCase());
+    }
+  }
+
+  return (filePath: string) => {
+    const baseName = filePath.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+    if (filenames.has(baseName)) return true;
+
+    const ext = baseName.includes(".") ? baseName.split(".").pop() : baseName;
+    return ext ? extensions.has(normalizeExtension(ext)) : false;
+  };
+}
+
+function normalizeExtension(extension: string): string {
+  return extension.replace(/^\./, "").toLowerCase();
+}
+
 
 // ─── AST node types per language ───────────────────────────────
 
@@ -252,3 +336,4 @@ export async function createParser(
   parser.setLanguage(lang);
   return parser;
 }
+

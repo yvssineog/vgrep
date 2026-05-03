@@ -113,11 +113,16 @@ On subsequent runs, vgrep compares Merkle tree hashes top-down. Only directories
 |---|---|
 | `vgrep init` | Build the Merkle tree and index the codebase  |
 | `vgrep status` | Show index stats, root hash, simhash, and mode  |
+| `vgrep search "<query>"` | Search the local semantic index  |
 
 ### Options
 
 ```bash
-vgrep init --path ./my-project   # Index a specific directory
+vgrep init --path ./my-project   # Scaffold .vgrepignore/config on first run
+vgrep init --force               # Index after reviewing .vgrepignore/config
+vgrep init --include docs,data   # Add docs/data to the default code profile
+vgrep init --only code,styles    # Index only selected profiles
+vgrep search "auth flow" --top-k 5
 vgrep --version                  # Show version
 vgrep --help                     # Show help
 ```
@@ -146,6 +151,19 @@ __snapshots__/
 ```
 
 Built-in defaults (always ignored): `node_modules/`, `.git/`, `.vgrep/`, `dist/`, `build/`, `.next/`, `coverage/`.
+
+---
+
+## File Profiles
+
+`vgrep init` also creates `.vgrep/config.json`, which declares index profiles:
+
+- `code`: source files and code-adjacent files like `.java`, `.ts`, `.py`, `.sql`, `.proto`, `Dockerfile`, `Makefile`
+- `docs`: `.md`, `.mdx`, `.txt`, `.rst`, `.adoc`, `README`, `LICENSE`, `CHANGELOG`
+- `data`: `.json`, `.yaml`, `.toml`, `.xml`, `.csv`, `.properties`, `.env`
+- `styles`: `.css`, `.scss`, `.sass`, `.less`
+
+The default is `code`. Use `--include` to add profiles to the default, or `--only` to replace it. You can create custom profiles by adding another entry under `fileProfiles` in `.vgrep/config.json`.
 
 ---
 

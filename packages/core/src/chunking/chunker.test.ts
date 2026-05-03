@@ -22,11 +22,11 @@ describe("chunkFile", () => {
     const chunks = await chunkFile("small.ts", content);
 
     expect(chunks.length).toBe(1);
-    expect(chunks[0].filePath).toBe("small.ts");
-    expect(chunks[0].startLine).toBe(1);
-    expect(chunks[0].endLine).toBe(3);
-    expect(chunks[0].language).toBe("typescript");
-    expect(chunks[0].chunkHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(chunks[0]!.filePath).toBe("small.ts");
+    expect(chunks[0]!.startLine).toBe(1);
+    expect(chunks[0]!.endLine).toBe(3);
+    expect(chunks[0]!.language).toBe("typescript");
+    expect(chunks[0]!.chunkHash).toMatch(/^[0-9a-f]{64}$/);
   });
 
   test("should split TypeScript file at function boundaries", async () => {
@@ -50,9 +50,9 @@ describe("chunkFile", () => {
 
     expect(chunks.length).toBeGreaterThanOrEqual(2);
     // First chunk should contain "hello"
-    expect(chunks[0].content).toContain("hello");
+    expect(chunks[0]!.content).toContain("hello");
     // Last chunk should contain "world"
-    expect(chunks[chunks.length - 1].content).toContain("world");
+    expect(chunks[chunks.length - 1]!.content).toContain("world");
   });
 
   test("should not duplicate leading comments across chunks", async () => {
@@ -104,7 +104,7 @@ describe("chunkFile", () => {
     const chunks = await chunkFile("module.py", content);
 
     expect(chunks.length).toBeGreaterThanOrEqual(2);
-    expect(chunks[0].language).toBe("python");
+    expect(chunks[0]!.language).toBe("python");
   });
 
   test("should use sliding window for unknown extensions", async () => {
@@ -113,7 +113,7 @@ describe("chunkFile", () => {
     const chunks = await chunkFile("mystery.xyz", content);
 
     expect(chunks.length).toBeGreaterThanOrEqual(1);
-    expect(chunks[0].language).toBeUndefined();
+    expect(chunks[0]!.language).toBeUndefined();
   });
 
   test("should subdivide oversized functions into sub-chunks", async () => {
@@ -144,7 +144,7 @@ describe("chunkFile", () => {
 
     expect(chunks1.length).toBe(chunks2.length);
     for (let i = 0; i < chunks1.length; i++) {
-      expect(chunks1[i].chunkHash).toBe(chunks2[i].chunkHash);
+      expect(chunks1[i]!.chunkHash).toBe(chunks2[i]!.chunkHash);
     }
   });
 

@@ -1,5 +1,6 @@
 import { join, posix } from "node:path";
 import type { MerkleNode, TreeStats } from "../types";
+import { isIndexableTextFile } from "../chunking/languages";
 
 /** File name for the user-defined ignore list. */
 const VGREPIGNORE_FILE = ".vgrepignore";
@@ -67,6 +68,8 @@ export class MerkleTree {
   constructor(
     private readonly rootDir: string,
     extraIgnorePatterns: string[] = [],
+    private readonly isIndexableFile: (relativePath: string) => boolean =
+      isIndexableTextFile,
   ) {
     this.ignoreRules = parseIgnorePatterns(extraIgnorePatterns);
   }
@@ -177,7 +180,10 @@ export class MerkleTree {
       onlyFiles: true,
     })) {
       const relativePath = normalizeRelativePath(path);
-      if (!this.isIgnored(relativePath)) {
+      if (
+        !this.isIgnored(relativePath) &&
+        this.isIndexableFile(relativePath)
+      ) {
         filePaths.push(relativePath);
       }
     }
@@ -242,7 +248,7 @@ export class MerkleTree {
     const children = directoryChildren.get(path) ?? [];
 
     for (let i = 0; i < children.length; i++) {
-      const child = children[i];
+      const child = children[i]!;
       if (child.type === "directory") {
         children[i] = this.buildDirectoryNode(child.path, directoryChildren);
       }

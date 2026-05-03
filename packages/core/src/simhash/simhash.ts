@@ -29,19 +29,19 @@ export function computeSimhash(fileHashes: string[]): string {
       // Extract bit i from the feature hash
       const byteIndex = Math.floor(i / 8);
       const bitIndex = i % 8;
-      const bit = (featureHash[byteIndex] >> bitIndex) & 1;
+      const bit = (featureHash[byteIndex]! >> bitIndex) & 1;
 
-      bits[i] += bit === 1 ? 1 : -1;
+      bits[i]! += bit === 1 ? 1 : -1;
     }
   }
 
   // Threshold to produce final simhash
   const result = new Uint8Array(8);
   for (let i = 0; i < 64; i++) {
-    if (bits[i] > 0) {
+    if (bits[i]! > 0) {
       const byteIndex = Math.floor(i / 8);
       const bitIndex = i % 8;
-      result[byteIndex] |= 1 << bitIndex;
+      result[byteIndex]! |= 1 << bitIndex;
     }
   }
 
@@ -61,7 +61,7 @@ export function hammingDistance(a: string, b: string): number {
   let distance = 0;
 
   for (let i = 0; i < 8; i++) {
-    let xor = bufA[i] ^ bufB[i];
+    let xor = bufA[i]! ^ bufB[i]!;
     // Count set bits (Brian Kernighan's method)
     while (xor) {
       distance++;

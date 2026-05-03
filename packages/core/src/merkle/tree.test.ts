@@ -3,6 +3,10 @@ import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { MerkleTree } from "./tree";
+import {
+  DEFAULT_FILE_PROFILES,
+  createIndexableFileMatcher,
+} from "../chunking/languages";
 
 describe("MerkleTree", () => {
   let tempDir: string;
@@ -114,11 +118,71 @@ describe("MerkleTree", () => {
     walk(root);
 
     expect(filePaths).not.toContain("node_modules/dep");
-    expect(filePaths).toContain(".vgrepignore");
+    expect(filePaths).not.toContain(".vgrepignore");
 
     // Clean up
     await rm(join(tempDir, "node_modules"), { recursive: true, force: true });
     await rm(join(tempDir, ".vgrepignore"), { force: true });
+  });
+
+  test("should skip binary and non-code files", async () => {
+    await writeFile(
+      join(tempDir, "image.png"),
+      new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00]),
+    );
+    await writeFile(join(tempDir, "data.json"), '{"not":"logic"}');
+    await writeFile(join(tempDir, "styles.css"), ".button { color: red; }");
+
+    const tree = new MerkleTree(tempDir);
+    await tree.build();
+    const root = tree.getRoot();
+
+    const filePaths: string[] = [];
+    const walk = (node: typeof root): void => {
+      if (node.type === "file") {
+        filePaths.push(node.path);
+      } else {
+        node.children?.forEach(walk);
+      }
+    };
+    walk(root);
+
+    expect(filePaths).not.toContain("image.png");
+    expect(filePaths).not.toContain("data.json");
+    expect(filePaths).not.toContain("styles.css");
+
+    await rm(join(tempDir, "image.png"), { force: true });
+    await rm(join(tempDir, "data.json"), { force: true });
+    await rm(join(tempDir, "styles.css"), { force: true });
+  });
+
+  test("should include non-code files when their profiles are selected", async () => {
+    await writeFile(join(tempDir, "notes.md"), "# useful docs");
+    await writeFile(join(tempDir, "data.json"), '{"useful":"data"}');
+
+    const tree = new MerkleTree(
+      tempDir,
+      [],
+      createIndexableFileMatcher(["code", "docs", "data"], DEFAULT_FILE_PROFILES),
+    );
+    await tree.build();
+    const root = tree.getRoot();
+
+    const filePaths: string[] = [];
+    const walk = (node: typeof root): void => {
+      if (node.type === "file") {
+        filePaths.push(node.path);
+      } else {
+        node.children?.forEach(walk);
+      }
+    };
+    walk(root);
+
+    expect(filePaths).toContain("notes.md");
+    expect(filePaths).toContain("data.json");
+
+    await rm(join(tempDir, "notes.md"), { force: true });
+    await rm(join(tempDir, "data.json"), { force: true });
   });
 
   test("should change root hash when a file changes", async () => {

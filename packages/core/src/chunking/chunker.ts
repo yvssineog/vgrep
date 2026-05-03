@@ -218,7 +218,7 @@ function postProcess(
   const result: { startLine: number; endLine: number }[] = [];
 
   for (let i = 0; i < chunks.length; i++) {
-    const { startLine, endLine } = chunks[i];
+    const { startLine, endLine } = chunks[i]!;
     const chunkSize = endLine - startLine + 1;
 
     if (chunkSize > MAX_CHUNK_LINES) {
@@ -233,7 +233,7 @@ function postProcess(
       }
     } else if (chunkSize < MIN_CHUNK_LINES && result.length > 0) {
       // Merge with previous chunk (extend its endLine)
-      result[result.length - 1].endLine = endLine;
+      result[result.length - 1]!.endLine = endLine;
     } else {
       result.push({ startLine, endLine });
     }

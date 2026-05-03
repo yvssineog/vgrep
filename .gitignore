@@ -5,6 +5,7 @@ node_modules/
 dist/
 packages/cli/src/vgrep.exe
 *.tsbuildinfo
+.tmp-tests/
 
 
 # SST

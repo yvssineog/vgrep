@@ -46,6 +46,8 @@ export interface IndexEntry {
   content: string;
   startLine: number;
   endLine: number;
+  /** Programming language identifier */
+  language?: string;
   /** 384-dim embedding vector */
   vector: number[];
 }
@@ -69,6 +71,19 @@ export interface VgrepConfig {
   teamApiKey?: string;
   /** SST backend URL */
   backendUrl?: string;
+  /** Profiles available for file selection during indexing */
+  fileProfiles?: Record<string, FileProfile>;
+  /** Profiles used when no --include or --only option is supplied */
+  defaultProfiles?: string[];
+}
+
+export interface FileProfile {
+  /** Human-readable explanation shown in generated config */
+  description?: string;
+  /** File extensions without the leading dot */
+  extensions: string[];
+  /** Exact lowercase filenames without paths, e.g. "dockerfile" */
+  filenames?: string[];
 }
 
 // ─── Merkle Tree Stats ─────────────────────────────────────────

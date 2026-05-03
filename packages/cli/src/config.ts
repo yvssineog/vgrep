@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
+import { DEFAULT_FILE_PROFILES } from "@vgrep/core";
 import type { VgrepConfig } from "@vgrep/core";
 
 /** Name of the hidden vgrep directory */
@@ -50,6 +51,22 @@ export async function readConfig(projectRoot: string): Promise<VgrepConfig> {
   }
 
   return file.json() as Promise<VgrepConfig>;
+}
+
+export async function ensureConfig(projectRoot: string): Promise<VgrepConfig> {
+  const existing = await readConfig(projectRoot);
+  const config: VgrepConfig = {
+    ...existing,
+    mode: existing.mode ?? "local",
+    defaultProfiles: existing.defaultProfiles ?? ["code"],
+    fileProfiles: {
+      ...DEFAULT_FILE_PROFILES,
+      ...(existing.fileProfiles ?? {}),
+    },
+  };
+
+  await writeConfig(projectRoot, config);
+  return config;
 }
 
 /**
