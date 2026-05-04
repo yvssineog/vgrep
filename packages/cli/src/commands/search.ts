@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
-import chalk from "chalk";
 import ora from "ora";
 import { LocalEngine } from "@vgrep/core";
+import { c } from "../style";
 import { FILES, isInitialized, vgrepDir } from "../config";
 
 export async function searchCommand(
@@ -12,15 +12,12 @@ export async function searchCommand(
   const projectRoot = resolve(options.path ?? process.cwd());
   const topK = parseTopK(options.topK);
 
-  console.log(
-    chalk.bold.cyan("\n🔎 vgrep search"),
-    chalk.dim(`— ${projectRoot}\n`),
-  );
+  console.log(c.boldCyan("\n🔎 vgrep search"), c.dim(`— ${projectRoot}\n`));
 
   if (!isInitialized(projectRoot)) {
     console.log(
-      chalk.red("✗ Not initialized."),
-      chalk.dim('Run "vgrep init" first.\n'),
+      c.red("✗ Not initialized."),
+      c.dim('Run "vgrep init" first.\n'),
     );
     process.exit(1);
   }
@@ -37,7 +34,7 @@ export async function searchCommand(
     spinner.stop();
 
     if (results.length === 0) {
-      console.log(chalk.yellow("No results found.\n"));
+      console.log(c.yellow("No results found.\n"));
       return;
     }
 
@@ -46,16 +43,16 @@ export async function searchCommand(
       const score = result.score.toFixed(3);
 
       console.log(
-        chalk.dim(`${index + 1}.`),
-        chalk.cyan(location),
-        chalk.dim(`score ${score}`),
+        c.dim(`${index + 1}.`),
+        c.cyan(location),
+        c.dim(`score ${score}`),
       );
-      console.log(chalk.dim(`   ${preview(result.content)}\n`));
+      console.log(c.dim(`   ${preview(result.content)}\n`));
     }
   } catch (error) {
     spinner.fail("Search failed");
     const message = error instanceof Error ? error.message : String(error);
-    console.log(chalk.red(message), "\n");
+    console.log(c.red(message), "\n");
     process.exit(1);
   }
 }

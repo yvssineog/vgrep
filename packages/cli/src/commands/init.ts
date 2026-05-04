@@ -1,7 +1,4 @@
 import { join, resolve } from "node:path";
-import chalk from "chalk";
-import ora from "ora";
-import pLimit from "p-limit";
 import {
   MerkleTree,
   createIndexableFileMatcher,
@@ -11,6 +8,8 @@ import {
   LocalEngine,
 } from "@vgrep/core";
 import type { MerkleNode, VgrepConfig } from "@vgrep/core";
+import ora from "ora";
+import { c } from "../style";
 import { formatBytes } from "./util";
 
 import {
@@ -36,30 +35,28 @@ export async function initCommand(options: {
 }): Promise<void> {
   const projectRoot = resolve(options.path ?? process.cwd());
 
-  console.log(
-    chalk.bold.cyan("\n⚡ vgrep init"),
-    chalk.dim(`— ${projectRoot}\n`),
-  );
+  console.log(c.boldCyan("\n⚡ vgrep init"), c.dim(`— ${projectRoot}\n`));
 
   // 1. Ensure .vgrep/config.json and .vgrepignore are scaffolded
   const config = await ensureConfig(projectRoot);
   const activeProfiles = resolveProfiles(config, options);
-  console.log(chalk.dim("  Profiles:"), chalk.bold(activeProfiles.join(", ")));
+  console.log(c.dim("  Profiles:"), c.bold(activeProfiles.join(", ")));
 
   const createdIgnore = await ensureVgrepIgnore(projectRoot);
   if (createdIgnore) {
-    console.log(
-      chalk.dim("  -"),
-      chalk.green("Scaffolded default .vgrepignore"),
-    );
+    console.log(c.dim("  -"), c.green("Scaffolded default .vgrepignore"));
     if (!options.force) {
       console.log(
-        chalk.yellow(
+        c.yellow(
           "\n.vgrepignore and .vgrep/config.json are ready. Review them, add custom profiles if needed, then run:",
         ),
       );
-      console.log(chalk.cyan("  vgrep init\n"));
-      console.log(chalk.dim("  Tip: use vgrep init --force to scaffold and index in one command.\n"));
+      console.log(c.cyan("  vgrep init\n"));
+      console.log(
+        c.dim(
+          "  Tip: use vgrep init --force to scaffold and index in one command.\n",
+        ),
+      );
       return;
     }
   }
@@ -82,66 +79,53 @@ export async function initCommand(options: {
   await tree.build();
   const elapsed = (performance.now() - startTime).toFixed(0);
 
-  spinner.succeed(
-    chalk.green(`Merkle tree built in ${chalk.bold(elapsed + "ms")}`),
-  );
+  spinner.succeed(c.green(`Merkle tree built in ${c.bold(elapsed + "ms")}`));
 
   // 4. Get stats
   const stats = tree.getStats();
-  console.log(chalk.dim("  ├─"), `Files: ${chalk.bold(stats.totalFiles)}`);
+  console.log(c.dim("  ├─"), `Files: ${c.bold(stats.totalFiles)}`);
+  console.log(c.dim("  ├─"), `Directories: ${c.bold(stats.totalDirectories)}`);
   console.log(
-    chalk.dim("  ├─"),
-    `Directories: ${chalk.bold(stats.totalDirectories)}`,
+    c.dim("  ├─"),
+    `Total size: ${c.bold(formatBytes(stats.totalSizeBytes))}`,
   );
   console.log(
-    chalk.dim("  ├─"),
-    `Total size: ${chalk.bold(formatBytes(stats.totalSizeBytes))}`,
-  );
-  console.log(
-    chalk.dim("  └─"),
-    `Root hash: ${chalk.yellow(stats.rootHash.slice(0, 16))}…`,
+    c.dim("  └─"),
+    `Root hash: ${c.yellow(stats.rootHash.slice(0, 16))}…`,
   );
 
   // 5. Compute simhash
   const fileHashes = tree.collectFileHashes();
   const simhash = computeSimhash(fileHashes);
-  console.log(
-    chalk.dim("\n  Simhash:"),
-    chalk.magenta.bold(simhash),
-    "\n",
-  );
+  console.log(c.dim("\n  Simhash:"), c.boldMagenta(simhash), "\n");
 
   // 6. Diff against previous tree
   const changes = diffTrees(previousTree, tree.getRoot());
 
   if (previousTree) {
     if (changes.length === 0) {
-      console.log(chalk.green("✓ No files changed since last index.\n"));
+      console.log(c.green("✓ No files changed since last index.\n"));
     } else {
       console.log(
-        chalk.yellow(`⚠ ${changes.length} file(s) changed since last index:\n`),
+        c.yellow(`⚠ ${changes.length} file(s) changed since last index:\n`),
       );
       const maxShow = 20;
       for (const change of changes.slice(0, maxShow)) {
         const icon =
           change.type === "added"
-            ? chalk.green("+")
+            ? c.green("+")
             : change.type === "deleted"
-              ? chalk.red("-")
-              : chalk.yellow("~");
+              ? c.red("-")
+              : c.yellow("~");
         console.log(`  ${icon} ${change.path}`);
       }
       if (changes.length > maxShow) {
-        console.log(
-          chalk.dim(`  ... and ${changes.length - maxShow} more\n`),
-        );
+        console.log(c.dim(`  ... and ${changes.length - maxShow} more\n`));
       }
       console.log();
     }
   } else {
-    console.log(
-      chalk.green(`✓ First index: ${changes.length} file(s) indexed.\n`),
-    );
+    console.log(c.green(`✓ First index: ${changes.length} file(s) indexed.\n`));
   }
 
   // 7. Index changed files into LanceDB
@@ -163,25 +147,24 @@ export async function initCommand(options: {
     .filter((change) => change.type !== "deleted")
     .map((change) => change.path);
 
-  const limit = pLimit(8);
   const chunkStartTime = performance.now();
   let chunkedFiles = 0;
-  const chunkGroups = await Promise.all(
-    filesToIndex.map((filePath) =>
-      limit(async () => {
-        const absolutePath = join(projectRoot, ...filePath.split("/"));
-        const content = await Bun.file(absolutePath).text();
-        const chunks = await chunkFile(filePath, content);
-        chunkedFiles += 1;
-        indexSpinner.text = formatIndexProgress(
-          "Chunked",
-          chunkedFiles,
-          filesToIndex.length,
-          filePath,
-        );
-        return chunks;
-      }),
-    ),
+  const chunkGroups = await mapWithConcurrency(
+    filesToIndex,
+    8,
+    async (filePath) => {
+      const absolutePath = join(projectRoot, ...filePath.split("/"));
+      const content = await Bun.file(absolutePath).text();
+      const chunks = await chunkFile(filePath, content);
+      chunkedFiles += 1;
+      indexSpinner.text = formatIndexProgress(
+        "Chunked",
+        chunkedFiles,
+        filesToIndex.length,
+        filePath,
+      );
+      return chunks;
+    },
   );
   const chunkElapsed = performance.now() - chunkStartTime;
 
@@ -198,25 +181,59 @@ export async function initCommand(options: {
   const indexElapsed = performance.now() - indexStartTime;
 
   indexSpinner.succeed(
-    chalk.green(
-      `Indexed ${chalk.bold(entries.length)} chunk(s) from ${chalk.bold(
+    c.green(
+      `Indexed ${c.bold(entries.length)} chunk(s) from ${c.bold(
         filesToIndex.length,
-      )} changed file(s) in ${chalk.bold(formatDuration(indexElapsed))}`,
+      )} changed file(s) in ${c.bold(formatDuration(indexElapsed))}`,
     ),
   );
-  console.log(chalk.dim("  -"), `Delete stale vectors: ${chalk.bold(formatDuration(deleteElapsed))}`);
-  console.log(chalk.dim("  -"), `Read + chunk files: ${chalk.bold(formatDuration(chunkElapsed))}`);
-  console.log(chalk.dim("  -"), `Embed/cache chunks: ${chalk.bold(formatDuration(embedElapsed))}`);
-  console.log(chalk.dim("  -"), `LanceDB upsert: ${chalk.bold(formatDuration(upsertElapsed))}`);
+  console.log(
+    c.dim("  -"),
+    `Delete stale vectors: ${c.bold(formatDuration(deleteElapsed))}`,
+  );
+  console.log(
+    c.dim("  -"),
+    `Read + chunk files: ${c.bold(formatDuration(chunkElapsed))}`,
+  );
+  console.log(
+    c.dim("  -"),
+    `Embed/cache chunks: ${c.bold(formatDuration(embedElapsed))}`,
+  );
+  console.log(
+    c.dim("  -"),
+    `LanceDB upsert: ${c.bold(formatDuration(upsertElapsed))}`,
+  );
 
   // 8. Persist the new tree only after indexing succeeds
   await writeMerkleJson(projectRoot, tree.serialize());
 
   console.log(
-    chalk.dim("  Index saved to"),
-    chalk.underline(`.vgrep/merkle.json`),
+    c.dim("  Index saved to"),
+    c.underline(`.vgrep/merkle.json`),
     "\n",
   );
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const run = async () => {
+    while (true) {
+      const i = cursor++;
+      if (i >= items.length) return;
+      results[i] = await worker(items[i]!, i);
+    }
+  };
+  const workers = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    run,
+  );
+  await Promise.all(workers);
+  return results;
 }
 
 function resolveProfiles(
