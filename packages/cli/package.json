@@ -19,6 +19,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@vgrep/core": "workspace:*"
+    "@vgrep/core": "workspace:*",
+    "effect": "^3.21.2"
   }
 }

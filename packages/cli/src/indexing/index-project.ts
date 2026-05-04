@@ -1,11 +1,13 @@
 import { join } from "node:path";
+import { Effect, Ref, Stream } from "effect";
 import {
   MerkleTree,
+  buildMerkleTree,
+  chunkFile,
+  computeSimhash,
   createIndexableFileMatcher,
   diffTrees,
-  computeSimhash,
-  chunkFile,
-  LocalEngine,
+  localEngine,
 } from "@vgrep/core";
 import type {
   ChangedFile,
@@ -13,14 +15,15 @@ import type {
   MerkleNode,
   VgrepConfig,
 } from "@vgrep/core";
-import { c, clearStatus, row, status } from "../style";
 import {
-  FILES,
-  readMerkleJson,
-  vgrepDir,
-  writeMerkleJson,
-} from "../config";
-import { formatBytes } from "../commands/util";
+  c,
+  clearStatus,
+  formatBytes,
+  formatDuration,
+  row,
+  status,
+} from "../style";
+import { FILES, readMerkleJson, vgrepDir, writeMerkleJson } from "../config";
 
 export type IndexProjectResult = {
   changes: ChangedFile[];
@@ -30,7 +33,7 @@ export type IndexProjectResult = {
   indexedChunks: number;
   previousTree: MerkleNode | null;
   simhash: string;
-  tree: MerkleTree;
+  tree: MerkleNode;
 };
 
 export type ApplyIndexDiffResult = {
@@ -40,202 +43,272 @@ export type ApplyIndexDiffResult = {
   indexedChunks: number;
 };
 
-export async function applyIndexDiff(options: {
+/** CPU-bound tree-sitter parsing: 8 ≈ saturates a typical core count. */
+const CHUNK_CONCURRENCY = 8;
+/** Aligned to ≈ 8 × the embedder's max-per-call so doEmbed isn't fragmented. */
+const EMBED_BATCH_SIZE = 256;
+
+interface Counters {
+  chunkedFiles: number;
+  producedChunks: number;
+  embeddedChunks: number;
+  entriesWritten: number;
+  embedMs: number;
+  upsertMs: number;
+}
+
+const initialCounters = (): Counters => ({
+  chunkedFiles: 0,
+  producedChunks: 0,
+  embeddedChunks: 0,
+  entriesWritten: 0,
+  embedMs: 0,
+  upsertMs: 0,
+});
+
+/**
+ * Apply an index diff. Built as a single Effect program: the Engine resource
+ * is acquired/released in one scope, and the chunk → embed → upsert pipeline
+ * is a single `Stream` with explicit bounded concurrency at each stage.
+ */
+export const applyIndexDiffEffect = (options: {
   projectRoot: string;
   treeJson: string;
   changes: ChangedFile[];
-}): Promise<ApplyIndexDiffResult> {
-  const { projectRoot, treeJson, changes } = options;
+}): Effect.Effect<ApplyIndexDiffResult, Error> =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { projectRoot, treeJson, changes } = options;
+      const indexStart = performance.now();
 
-  const indexStartTime = performance.now();
-  const engine = new LocalEngine({
-    dbPath: join(vgrepDir(projectRoot), FILES.index),
-    cacheDir: join(vgrepDir(projectRoot), FILES.cache),
-  });
+      const engine = yield* localEngine({
+        dbPath: join(vgrepDir(projectRoot), FILES.index),
+        cacheDir: join(vgrepDir(projectRoot), FILES.cache),
+      });
 
-  const deleteStart = performance.now();
-  const deletedFiles = changes
-    .filter((ch) => ch.type === "deleted")
-    .map((ch) => ch.path);
-  await engine.deleteByFile(deletedFiles);
-  const deleteMs = performance.now() - deleteStart;
+      const deletedFiles = changes
+        .filter((ch) => ch.type === "deleted")
+        .map((ch) => ch.path);
+      const filesToIndex = changes
+        .filter((ch) => ch.type !== "deleted")
+        .map((ch) => ch.path);
 
-  const filesToIndex = changes
-    .filter((ch) => ch.type !== "deleted")
-    .map((ch) => ch.path);
+      const deleteStart = performance.now();
+      yield* engine.deleteByFile(deletedFiles);
+      const deleteMs = performance.now() - deleteStart;
 
-  console.log();
-  const failedFiles: { path: string; reason: string }[] = [];
+      console.log();
 
-  const chunkOne = async (filePath: string): Promise<CodeChunk[]> => {
-    const absolutePath = join(projectRoot, ...filePath.split("/"));
-    try {
-      const content = await Bun.file(absolutePath).text();
-      return await chunkFile(filePath, content);
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      failedFiles.push({ path: filePath, reason });
-      return [];
-    }
-  };
+      const failed = yield* Ref.make<{ path: string; reason: string }[]>([]);
+      const counters = yield* Ref.make<Counters>(initialCounters());
 
-  // Pipeline: chunking workers feed a bounded buffer; embed+upsert drains
-  // it in batches. While we await embedding, chunking workers keep producing,
-  // and the previous batch's upsert overlaps with the next batch's embed.
-  let chunkedFiles = 0;
-  let producedChunks = 0;
-  let embeddedChunks = 0;
-  let entriesWritten = 0;
-  let chunkMs = 0;
-  let embedMs = 0;
-  let upsertMs = 0;
-  const chunkPhaseStart = performance.now();
+      const chunkOne = (filePath: string) =>
+        Effect.tryPromise({
+          try: async () => {
+            const absolutePath = join(projectRoot, ...filePath.split("/"));
+            const content = await Bun.file(absolutePath).text();
+            return await chunkFile(filePath, content);
+          },
+          catch: (cause) =>
+            cause instanceof Error ? cause : new Error(String(cause)),
+        }).pipe(
+          // Failure of one file must not abort the whole pipeline.
+          Effect.catchAll((err) =>
+            Ref.update(failed, (xs) => [
+              ...xs,
+              { path: filePath, reason: err.message },
+            ]).pipe(Effect.as<CodeChunk[]>([])),
+          ),
+        );
 
-  const buffer: CodeChunk[] = [];
-  let pendingUpsert: Promise<void> = Promise.resolve();
+      const printProgress = Effect.gen(function* () {
+        const c = yield* Ref.get(counters);
+        status(
+          `chunk ${c.chunkedFiles}/${filesToIndex.length}  embed ${c.embeddedChunks}/${c.producedChunks}`,
+        );
+      });
 
-  const flushBatch = async (batch: CodeChunk[]): Promise<void> => {
-    const embedStart = performance.now();
-    const entries = await engine.embedChunks(batch);
-    embedMs += performance.now() - embedStart;
-    embeddedChunks += batch.length;
+      status("chunking...");
+      const chunkPhaseStart = performance.now();
 
-    // Backpressure: don't pile up upsert work; one batch in flight at a time.
-    await pendingUpsert;
-    pendingUpsert = (async () => {
-      const upsertStart = performance.now();
-      await engine.upsert(entries);
-      upsertMs += performance.now() - upsertStart;
-      entriesWritten += entries.length;
-    })();
-  };
-
-  status("chunking...");
-  for await (const chunks of streamWithConcurrency(
-    filesToIndex,
-    CHUNK_CONCURRENCY,
-    chunkOne,
-  )) {
-    chunkedFiles += 1;
-    if (chunks.length > 0) {
-      buffer.push(...chunks);
-      producedChunks += chunks.length;
-    }
-    status(
-      `chunk ${chunkedFiles}/${filesToIndex.length}  embed ${embeddedChunks}/${producedChunks}`,
-    );
-
-    while (buffer.length >= EMBED_BATCH_SIZE) {
-      const batch = buffer.splice(0, EMBED_BATCH_SIZE);
-      await flushBatch(batch);
-      status(
-        `chunk ${chunkedFiles}/${filesToIndex.length}  embed ${embeddedChunks}/${producedChunks}`,
+      yield* Stream.fromIterable(filesToIndex).pipe(
+        Stream.mapEffect(chunkOne, {
+          concurrency: CHUNK_CONCURRENCY,
+          unordered: true,
+        }),
+        Stream.tap((chunks) =>
+          Ref.update(counters, (s) => ({
+            ...s,
+            chunkedFiles: s.chunkedFiles + 1,
+            producedChunks: s.producedChunks + chunks.length,
+          })).pipe(Effect.zipRight(printProgress)),
+        ),
+        Stream.flattenIterables,
+        Stream.grouped(EMBED_BATCH_SIZE),
+        // concurrency: 2 lets one batch upsert while the next batch embeds
+        // (the prior pipeline's overlap, expressed declaratively).
+        Stream.mapEffect(
+          (batch) =>
+            Effect.gen(function* () {
+              const arr = Array.from(batch);
+              const t0 = performance.now();
+              const entries = yield* engine.embedChunks(arr);
+              const embedMs = performance.now() - t0;
+              const t1 = performance.now();
+              yield* engine.upsert(entries);
+              const upsertMs = performance.now() - t1;
+              yield* Ref.update(counters, (s) => ({
+                ...s,
+                embeddedChunks: s.embeddedChunks + arr.length,
+                entriesWritten: s.entriesWritten + entries.length,
+                embedMs: s.embedMs + embedMs,
+                upsertMs: s.upsertMs + upsertMs,
+              }));
+              yield* printProgress;
+            }),
+          { concurrency: 2 },
+        ),
+        Stream.runDrain,
       );
-    }
-  }
-  chunkMs = performance.now() - chunkPhaseStart;
 
-  if (buffer.length > 0) {
-    await flushBatch(buffer.splice(0));
-  }
-  await pendingUpsert;
+      const finalCounters = yield* Ref.get(counters);
+      const failedFiles = yield* Ref.get(failed);
+      const chunkMs = performance.now() - chunkPhaseStart;
+      const indexMs = performance.now() - indexStart;
+      clearStatus();
 
-  const indexMs = performance.now() - indexStartTime;
-  clearStatus();
+      console.log(
+        row(
+          "indexed",
+          `${c.bold(finalCounters.entriesWritten)} chunks from ${c.bold(filesToIndex.length)} files  ${formatDuration(indexMs)}`,
+        ),
+      );
+      if (deletedFiles.length > 0) {
+        console.log(row("delete", c.dim(formatDuration(deleteMs))));
+      }
+      console.log(row("chunk", c.dim(formatDuration(chunkMs))));
+      console.log(row("embed", c.dim(formatDuration(finalCounters.embedMs))));
+      console.log(row("upsert", c.dim(formatDuration(finalCounters.upsertMs))));
+      if (failedFiles.length > 0) {
+        console.log(
+          row(
+            "skipped",
+            c.yellow(`${failedFiles.length} file(s) failed to chunk`),
+          ),
+        );
+        for (const { path, reason } of failedFiles.slice(0, 3)) {
+          console.log(`  ${c.dim(path)} - ${c.dim(reason.slice(0, 80))}`);
+        }
+        if (failedFiles.length > 3) {
+          console.log(`  ${c.dim(`... ${failedFiles.length - 3} more`)}`);
+        }
+      }
 
-  console.log(
-    row(
-      "indexed",
-      `${c.bold(entriesWritten)} chunks from ${c.bold(filesToIndex.length)} files  ${formatDuration(indexMs)}`,
-    ),
+      yield* Effect.tryPromise({
+        try: () => writeMerkleJson(projectRoot, treeJson),
+        catch: (e) => (e instanceof Error ? e : new Error(String(e))),
+      });
+
+      return {
+        deletedFiles,
+        filesToIndex,
+        failedFiles,
+        indexedChunks: finalCounters.entriesWritten,
+      } satisfies ApplyIndexDiffResult;
+    }),
   );
-  if (deletedFiles.length > 0) {
-    console.log(row("delete", c.dim(formatDuration(deleteMs))));
-  }
-  console.log(row("chunk", c.dim(formatDuration(chunkMs))));
-  console.log(row("embed", c.dim(formatDuration(embedMs))));
-  console.log(row("upsert", c.dim(formatDuration(upsertMs))));
-  if (failedFiles.length > 0) {
-    console.log(
-      row(
-        "skipped",
-        c.yellow(`${failedFiles.length} file(s) failed to chunk`),
-      ),
-    );
-    for (const { path, reason } of failedFiles.slice(0, 3)) {
-      console.log(`  ${c.dim(path)} - ${c.dim(reason.slice(0, 80))}`);
-    }
-    if (failedFiles.length > 3) {
-      console.log(`  ${c.dim(`... ${failedFiles.length - 3} more`)}`);
-    }
-  }
 
-  await writeMerkleJson(projectRoot, treeJson);
+/** Promise-flavoured wrapper for legacy call sites. */
+export const applyIndexDiff = (options: {
+  projectRoot: string;
+  treeJson: string;
+  changes: ChangedFile[];
+}): Promise<ApplyIndexDiffResult> => Effect.runPromise(applyIndexDiffEffect(options));
 
-  return {
-    deletedFiles,
-    filesToIndex,
-    failedFiles,
-    indexedChunks: entriesWritten,
-  };
-}
-
-export async function indexProject(options: {
+export const indexProjectEffect = (options: {
   projectRoot: string;
   config: VgrepConfig;
   activeProfiles: string[];
-}): Promise<IndexProjectResult> {
-  const { projectRoot, config, activeProfiles } = options;
+}): Effect.Effect<IndexProjectResult, Error> =>
+  Effect.gen(function* () {
+    const { projectRoot, config, activeProfiles } = options;
 
-  const previousJson = await readMerkleJson(projectRoot);
-  const previousTree: MerkleNode | null = previousJson
-    ? MerkleTree.deserialize(previousJson)
-    : null;
+    const previousJson = yield* Effect.tryPromise({
+      try: () => readMerkleJson(projectRoot),
+      catch: (e) => (e instanceof Error ? e : new Error(String(e))),
+    });
+    const previousTree: MerkleNode | null = previousJson
+      ? MerkleTree.deserialize(previousJson)
+      : null;
 
-  status("building merkle tree...");
-  const tree = new MerkleTree(
-    projectRoot,
-    [],
-    createIndexableFileMatcher(activeProfiles, config.fileProfiles ?? {}),
-  );
+    status("building merkle tree...");
+    const matcher = createIndexableFileMatcher(
+      activeProfiles,
+      config.fileProfiles ?? {},
+    );
+    const start = performance.now();
+    const tree = yield* buildMerkleTree(projectRoot, matcher);
+    const treeMs = performance.now() - start;
 
-  const startTime = performance.now();
-  await tree.build();
-  const treeMs = performance.now() - startTime;
+    const fileHashes = collectHashes(tree);
+    const sim = computeSimhash(fileHashes);
+    const sizeBytes = collectTotalSize(tree);
 
-  const stats = tree.getStats();
-  const fileHashes = tree.collectFileHashes();
-  const simhash = computeSimhash(fileHashes);
+    clearStatus();
+    console.log(
+      row(
+        "tree",
+        `${fileHashes.length} files  ${formatBytes(sizeBytes)}  ${formatDuration(treeMs)}`,
+      ),
+    );
+    console.log(row("hash", c.dim(tree.hash.slice(0, 16))));
+    console.log(row("simhash", c.dim(sim)));
 
-  clearStatus();
-  console.log(
-    row(
-      "tree",
-      `${stats.totalFiles} files  ${formatBytes(stats.totalSizeBytes)}  ${formatDuration(treeMs)}`,
-    ),
-  );
-  console.log(row("hash", c.dim(stats.rootHash.slice(0, 16))));
-  console.log(row("simhash", c.dim(simhash)));
+    const changes = diffTrees(previousTree, tree);
+    logChanges(previousTree, changes);
 
-  const changes = diffTrees(previousTree, tree.getRoot());
-  logChanges(previousTree, changes);
+    const applied = yield* applyIndexDiffEffect({
+      projectRoot,
+      treeJson: JSON.stringify(tree, null, 2),
+      changes,
+    });
 
-  const applied = await applyIndexDiff({
-    projectRoot,
-    treeJson: tree.serialize(),
-    changes,
+    return {
+      changes,
+      deletedFiles: applied.deletedFiles,
+      filesToIndex: applied.filesToIndex,
+      failedFiles: applied.failedFiles,
+      indexedChunks: applied.indexedChunks,
+      previousTree,
+      simhash: sim,
+      tree,
+    } satisfies IndexProjectResult;
   });
 
-  return {
-    changes,
-    deletedFiles: applied.deletedFiles,
-    filesToIndex: applied.filesToIndex,
-    failedFiles: applied.failedFiles,
-    indexedChunks: applied.indexedChunks,
-    previousTree,
-    simhash,
-    tree,
+export const indexProject = (options: {
+  projectRoot: string;
+  config: VgrepConfig;
+  activeProfiles: string[];
+}): Promise<IndexProjectResult> => Effect.runPromise(indexProjectEffect(options));
+
+function collectHashes(node: MerkleNode): string[] {
+  const out: string[] = [];
+  const walk = (n: MerkleNode): void => {
+    if (n.type === "file") out.push(n.hash);
+    else n.children?.forEach(walk);
   };
+  walk(node);
+  return out;
+}
+
+function collectTotalSize(node: MerkleNode): number {
+  let s = 0;
+  const walk = (n: MerkleNode): void => {
+    if (n.type === "file") s += n.size ?? 0;
+    else n.children?.forEach(walk);
+  };
+  walk(node);
+  return s;
 }
 
 function logChanges(
@@ -246,7 +319,6 @@ function logChanges(
     console.log(row("changes", `first index, ${changes.length} files`));
     return;
   }
-
   if (changes.length === 0) {
     console.log(row("changes", c.green("none")));
     return;
@@ -284,52 +356,3 @@ function logChanges(
   }
 }
 
-/** Worker fan-out for file chunking. Tree-sitter is CPU-bound; 8 ≈ saturates. */
-const CHUNK_CONCURRENCY = 8;
-
-/** Chunks per embed call. Aligned to roughly 8 × transformersEmbedding's
- *  internal maxEmbeddingsPerCall (32) so we don't fragment doEmbed batches,
- *  while still bounding peak memory and surfacing progress frequently. */
-const EMBED_BATCH_SIZE = 256;
-
-/**
- * Run `worker` over `items` with bounded concurrency, yielding each result
- * as soon as it completes. Order is completion order, not input order.
- */
-async function* streamWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T, index: number) => Promise<R>,
-): AsyncGenerator<R> {
-  const limit = Math.min(concurrency, items.length);
-  if (limit === 0) return;
-
-  type Settled = { key: number; result: R };
-  const inflight = new Map<number, Promise<Settled>>();
-  let cursor = 0;
-  let nextKey = 0;
-
-  const launch = (): void => {
-    while (inflight.size < limit && cursor < items.length) {
-      const i = cursor++;
-      const key = nextKey++;
-      inflight.set(
-        key,
-        worker(items[i]!, i).then((result) => ({ key, result })),
-      );
-    }
-  };
-
-  launch();
-  while (inflight.size > 0) {
-    const settled = await Promise.race(inflight.values());
-    inflight.delete(settled.key);
-    yield settled.result;
-    launch();
-  }
-}
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms.toFixed(0)}ms`;
-  return `${(ms / 1000).toFixed(2)}s`;
-}

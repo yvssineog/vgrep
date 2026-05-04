@@ -14,9 +14,26 @@ export type {
 } from "./types";
 
 // Merkle Tree
-export { MerkleTree } from "./merkle/tree";
-export { MerkleTreeUpdater, type MerkleUpdateResult } from "./merkle/updater";
+export {
+  MerkleTree,
+  buildMerkleTree,
+  collectFileHashes,
+  deserializeTree,
+  treeStats,
+} from "./merkle/tree";
+export { updateMerkleTree, type MerkleUpdateResult } from "./merkle/updater";
 export { diffTrees } from "./merkle/diff";
+
+// Ignore rules + path helpers (shared between core and CLI)
+export {
+  emptyIgnore,
+  loadIgnore,
+  matchesIgnore,
+  mergeIgnore,
+  parseIgnore,
+  type IgnoreRules,
+} from "./ignore";
+export * as paths from "./util/paths";
 
 // Simhash
 export { computeSimhash, hammingDistance } from "./simhash/simhash";
@@ -32,13 +49,16 @@ export {
 } from "./chunking/languages";
 
 // Embeddings
-export { EmbeddingCache } from "./embedding/cache";
-export { CachedEmbedder, type EmbeddingModel } from "./embedding/embedder";
+export { readCachedVector, writeCachedVector } from "./embedding/cache";
+export {
+  embedChunksEffect,
+  embedTextEffect,
+  type EmbeddingModel,
+} from "./embedding/embedder";
 export {
   transformersEmbedding,
   type TransformersEmbeddingOptions,
 } from "./embedding/transformers";
 
-// Vector engines
-export { LocalEngine } from "./engine/local-engine";
-export type { VectorEngine } from "./engine/interface";
+// Vector engine
+export { localEngine, type LocalEngineE } from "./engine/local-engine";

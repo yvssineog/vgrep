@@ -1,5 +1,6 @@
 import { join, resolve } from "node:path";
-import { LocalEngine } from "@vgrep/core";
+import { Effect } from "effect";
+import { localEngine } from "@vgrep/core";
 import { c, clearStatus, header, status } from "../style";
 import { FILES, isInitialized, vgrepDir } from "../config";
 
@@ -20,45 +21,48 @@ export async function searchCommand(
     process.exit(1);
   }
 
-  const engine = new LocalEngine({
-    dbPath: join(vgrepDir(projectRoot), FILES.index),
-    cacheDir: join(vgrepDir(projectRoot), FILES.cache),
-  });
-
   status("searching...");
 
-  try {
-    const results = await engine.search(queryText, topK);
-    clearStatus();
+  const program = Effect.scoped(
+    Effect.flatMap(
+      localEngine({
+        dbPath: join(vgrepDir(projectRoot), FILES.index),
+        cacheDir: join(vgrepDir(projectRoot), FILES.cache),
+      }),
+      (engine) => engine.search(queryText, topK),
+    ),
+  );
 
-    if (results.length === 0) {
-      console.log(c.dim("no results"));
-      return;
-    }
+  const results = await Effect.runPromise(
+    Effect.either(program),
+  );
+  clearStatus();
 
-    for (const [i, result] of results.entries()) {
-      if (i > 0) console.log();
-      const location = `${c.cyan(result.filePath)}${c.dim(`:${result.startLine}-${result.endLine}`)}`;
-      const score = c.dim(result.score.toFixed(3));
-      console.log(`${location} ${score}`);
-      console.log(formatChunk(result.content, result.startLine));
-    }
-  } catch (error) {
-    clearStatus();
-    const message = error instanceof Error ? error.message : String(error);
-    console.log(`${c.red("search failed")} ${c.dim(message)}`);
+  if (results._tag === "Left") {
+    console.log(`${c.red("search failed")} ${c.dim(results.left.message)}`);
     process.exit(1);
+  }
+
+  if (results.right.length === 0) {
+    console.log(c.dim("no results"));
+    return;
+  }
+
+  for (const [i, result] of results.right.entries()) {
+    if (i > 0) console.log();
+    const location = `${c.cyan(result.filePath)}${c.dim(`:${result.startLine}-${result.endLine}`)}`;
+    const score = c.dim(result.score.toFixed(3));
+    console.log(`${location} ${score}`);
+    console.log(formatChunk(result.content, result.startLine));
   }
 }
 
 function parseTopK(value?: string): number {
   if (!value) return DEFAULT_TOP_K;
-
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     throw new Error("--top-k must be a positive integer");
   }
-
   return parsed;
 }
 

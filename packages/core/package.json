@@ -10,10 +10,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "web-tree-sitter": "0.24.0",
-    "tree-sitter-wasms": "^0.1.11",
     "@ai-sdk/provider": "^2.0.0",
+    "@huggingface/transformers": "^3.3.3",
     "ai": "^5.0.0",
-    "@huggingface/transformers": "^3.3.3"
+    "effect": "^3.21.2",
+    "tree-sitter-wasms": "^0.1.11",
+    "web-tree-sitter": "0.24.0"
   }
 }

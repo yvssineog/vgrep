@@ -2,8 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { Effect } from "effect";
 import type { EmbeddingModelV2 } from "@ai-sdk/provider";
-import { CachedEmbedder } from "./embedder";
+import { embedChunksEffect } from "./embedder";
 
 function countingModel(): {
   model: EmbeddingModelV2<string>;
@@ -24,11 +25,10 @@ function countingModel(): {
   return { model, calls: () => calls };
 }
 
-describe("CachedEmbedder", () => {
+describe("embedChunksEffect", () => {
   test("cache miss writes a reusable vector and later hits avoid the model", async () => {
     const cacheDir = await mkdtemp(join(tmpdir(), "vgrep-cache-test-"));
     const { model, calls } = countingModel();
-    const cached = new CachedEmbedder(cacheDir, model);
     const chunk = {
       filePath: "src/example.ts",
       chunkHash: "abc123",
@@ -39,8 +39,12 @@ describe("CachedEmbedder", () => {
     };
 
     try {
-      const [first] = await cached.embedChunks([chunk]);
-      const [second] = await cached.embedChunks([chunk]);
+      const [first] = await Effect.runPromise(
+        embedChunksEffect(cacheDir, model, [chunk]),
+      );
+      const [second] = await Effect.runPromise(
+        embedChunksEffect(cacheDir, model, [chunk]),
+      );
 
       expect(first!.vector).toEqual([0.1, 0.2, 0.3]);
       expect(second!.vector[0]).toBeCloseTo(0.1);
@@ -55,7 +59,6 @@ describe("CachedEmbedder", () => {
   test("batches uncached chunks into a single embedMany call", async () => {
     const cacheDir = await mkdtemp(join(tmpdir(), "vgrep-cache-test-"));
     const { model, calls } = countingModel();
-    const cached = new CachedEmbedder(cacheDir, model);
     const chunks = [
       { filePath: "a.ts", chunkHash: "h1", content: "a", startLine: 1, endLine: 1 },
       { filePath: "b.ts", chunkHash: "h2", content: "b", startLine: 1, endLine: 1 },
@@ -63,7 +66,9 @@ describe("CachedEmbedder", () => {
     ];
 
     try {
-      const entries = await cached.embedChunks(chunks);
+      const entries = await Effect.runPromise(
+        embedChunksEffect(cacheDir, model, chunks),
+      );
       expect(entries).toHaveLength(3);
       expect(calls()).toBe(1);
     } finally {

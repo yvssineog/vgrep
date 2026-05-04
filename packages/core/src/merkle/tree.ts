@@ -1,272 +1,140 @@
-import { join, posix } from "node:path";
+import { Effect } from "effect";
 import type { MerkleNode, TreeStats } from "../types";
 import { isIndexableTextFile } from "../chunking/languages";
+import {
+  emptyIgnore,
+  loadIgnore,
+  matchesIgnore,
+  mergeIgnore,
+  parseIgnore,
+  type IgnoreRules,
+} from "../ignore";
+import { toRelative } from "../util/paths";
+import { buildRootFromLeaves, hashFileEffect } from "./internal";
 
-/** File name for the user-defined ignore list. */
-const VGREPIGNORE_FILE = ".vgrepignore";
+const FILE_HASH_CONCURRENCY = 32;
 
-interface IgnoreRules {
-  exactNames: Set<string>;
-  globPatterns: Bun.Glob[];
-}
+const scanFiles = (rootDir: string): Effect.Effect<string[], Error> =>
+  Effect.tryPromise({
+    try: async () => {
+      const out: string[] = [];
+      for await (const path of new Bun.Glob("**/*").scan({
+        cwd: rootDir,
+        dot: true,
+        onlyFiles: true,
+      })) {
+        out.push(toRelative(path));
+      }
+      return out;
+    },
+    catch: (e) => (e instanceof Error ? e : new Error(String(e))),
+  });
 
 /**
- * Parse ignore patterns into two simple matching buckets.
+ * Build a Merkle tree of the project under `rootDir`.
  *
- * Plain names like `node_modules/` or `.env` become exact names.
- * Patterns with glob metacharacters like `*.log` become Bun.Glob matchers.
+ * - Concurrency is bounded by `FILE_HASH_CONCURRENCY` (file hashing is IO-
+ *   bound; 32 saturates SSDs without blowing up open-fd counts).
+ * - Ignore rules layer: `extraIgnore` (caller-provided) merged onto the
+ *   `.vgrepignore` discovered at the project root.
  */
-function parseIgnorePatterns(patterns: Iterable<string>): IgnoreRules {
-  const exactNames = new Set<string>();
-  const globPatterns: Bun.Glob[] = [];
+export const buildMerkleTree = (
+  rootDir: string,
+  isIndexable: (relativePath: string) => boolean = isIndexableTextFile,
+  extraIgnore: IgnoreRules = emptyIgnore(),
+): Effect.Effect<MerkleNode, Error> =>
+  Effect.gen(function* () {
+    const rules = emptyIgnore();
+    mergeIgnore(rules, extraIgnore);
+    mergeIgnore(rules, yield* loadIgnore(rootDir));
 
-  for (const raw of patterns) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
+    const filtered = (yield* scanFiles(rootDir))
+      .filter((p) => !matchesIgnore(rules, p) && isIndexable(p))
+      .sort((a, b) => a.localeCompare(b));
 
-    const pattern = line.endsWith("/") ? line.slice(0, -1) : line;
+    const fileNodes = yield* Effect.forEach(
+      filtered,
+      (p) => hashFileEffect(rootDir, p),
+      { concurrency: FILE_HASH_CONCURRENCY },
+    );
 
-    if (/[*?{}\[\]]/.test(pattern)) {
-      globPatterns.push(new Bun.Glob(pattern));
+    return buildRootFromLeaves(fileNodes);
+  });
+
+/** Parse a previously-serialized tree (the format is plain JSON). */
+export const deserializeTree = (json: string): MerkleNode =>
+  JSON.parse(json) as MerkleNode;
+
+/** Walk a tree and report file/directory counts and total bytes. */
+export function treeStats(root: MerkleNode): TreeStats {
+  let totalFiles = 0;
+  let totalDirectories = 0;
+  let totalSizeBytes = 0;
+  const walk = (n: MerkleNode): void => {
+    if (n.type === "file") {
+      totalFiles++;
+      totalSizeBytes += n.size ?? 0;
     } else {
-      exactNames.add(normalizeRelativePath(pattern));
+      totalDirectories++;
+      n.children?.forEach(walk);
     }
-  }
-
-  return { exactNames, globPatterns };
+  };
+  walk(root);
+  return { totalFiles, totalDirectories, totalSizeBytes, rootHash: root.hash };
 }
 
-function mergeIgnoreRules(target: IgnoreRules, source: IgnoreRules): void {
-  for (const name of source.exactNames) {
-    target.exactNames.add(name);
-  }
-  target.globPatterns.push(...source.globPatterns);
-}
-
-function normalizeRelativePath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/^\.\//, "");
+/** Collect all file (leaf) hashes in tree order — used as input to simhash. */
+export function collectFileHashes(root: MerkleNode): string[] {
+  const out: string[] = [];
+  const walk = (n: MerkleNode): void => {
+    if (n.type === "file") out.push(n.hash);
+    else n.children?.forEach(walk);
+  };
+  walk(root);
+  return out;
 }
 
 /**
- * Builds a Merkle tree from indexed files.
- *
- * Ignore rules are accumulated from two places:
- * 1. extraIgnorePatterns: optional caller-provided patterns for tests/tools.
- * 2. .vgrepignore: project-level user config parsed on build().
- *
- * The CLI creates a default .vgrepignore during `vgrep init`; the core tree
- * builder only applies ignore rules it is explicitly given or can read there.
- *
- * File discovery uses Bun.Glob, file reads use Bun.file(), and hashing uses
- * Bun.CryptoHasher. Empty directories are not represented because they do not
- * affect the content index.
+ * Class wrapper kept for the test suite (`new MerkleTree(...).build()`).
+ * New code should call `buildMerkleTree(...)` directly.
  */
 export class MerkleTree {
   private root: MerkleNode | null = null;
-  private ignoreRules: IgnoreRules;
-
   constructor(
     private readonly rootDir: string,
-    extraIgnorePatterns: string[] = [],
+    private readonly extraIgnorePatterns: string[] = [],
     private readonly isIndexableFile: (relativePath: string) => boolean =
       isIndexableTextFile,
-  ) {
-    this.ignoreRules = parseIgnorePatterns(extraIgnorePatterns);
-  }
+  ) {}
 
-  /**
-   * Build the Merkle tree and return its root node.
-   */
   async build(): Promise<MerkleNode> {
-    await this.loadVgrepignore();
-    this.root = await this.buildFromFiles();
+    this.root = await Effect.runPromise(
+      buildMerkleTree(
+        this.rootDir,
+        this.isIndexableFile,
+        parseIgnore(this.extraIgnorePatterns),
+      ),
+    );
     return this.root;
   }
 
-  /** Get the root node (must call build() first). */
   getRoot(): MerkleNode {
-    if (!this.root) {
+    if (!this.root)
       throw new Error("MerkleTree not built yet. Call build() first.");
-    }
     return this.root;
   }
 
-  /** Compute tree statistics. */
   getStats(): TreeStats {
-    const root = this.getRoot();
-    let totalFiles = 0;
-    let totalDirectories = 0;
-    let totalSizeBytes = 0;
-
-    const walk = (node: MerkleNode): void => {
-      if (node.type === "file") {
-        totalFiles++;
-        totalSizeBytes += node.size ?? 0;
-      } else {
-        totalDirectories++;
-        node.children?.forEach(walk);
-      }
-    };
-
-    walk(root);
-
-    return {
-      totalFiles,
-      totalDirectories,
-      totalSizeBytes,
-      rootHash: root.hash,
-    };
+    return treeStats(this.getRoot());
   }
 
-  /** Serialize the tree to a JSON string. */
   serialize(): string {
     return JSON.stringify(this.getRoot(), null, 2);
   }
 
-  /** Deserialize a JSON string into a MerkleNode tree. */
-  static deserialize(json: string): MerkleNode {
-    return JSON.parse(json) as MerkleNode;
-  }
-
-  /** Collect all leaf (file) hashes for simhash computation. */
   collectFileHashes(): string[] {
-    const hashes: string[] = [];
-    const walk = (node: MerkleNode): void => {
-      if (node.type === "file") {
-        hashes.push(node.hash);
-      } else {
-        node.children?.forEach(walk);
-      }
-    };
-    walk(this.getRoot());
-    return hashes;
+    return collectFileHashes(this.getRoot());
   }
 
-  private async loadVgrepignore(): Promise<void> {
-    const ignoreFile = Bun.file(join(this.rootDir, VGREPIGNORE_FILE));
-    if (!(await ignoreFile.exists())) return;
-
-    const content = await ignoreFile.text();
-    mergeIgnoreRules(this.ignoreRules, parseIgnorePatterns(content.split("\n")));
-  }
-
-  private isIgnored(relativePath: string): boolean {
-    const normalizedPath = normalizeRelativePath(relativePath);
-    const name = posix.basename(normalizedPath);
-    const segments = normalizedPath.split("/");
-
-    if (
-      this.ignoreRules.exactNames.has(name) ||
-      this.ignoreRules.exactNames.has(normalizedPath) ||
-      segments.some((segment) => this.ignoreRules.exactNames.has(segment))
-    ) {
-      return true;
-    }
-
-    for (const glob of this.ignoreRules.globPatterns) {
-      if (glob.match(name) || glob.match(normalizedPath)) return true;
-    }
-
-    return false;
-  }
-
-  private async buildFromFiles(): Promise<MerkleNode> {
-    const glob = new Bun.Glob("**/*");
-    const filePaths: string[] = [];
-
-    for await (const path of glob.scan({
-      cwd: this.rootDir,
-      dot: true,
-      onlyFiles: true,
-    })) {
-      const relativePath = normalizeRelativePath(path);
-      if (
-        !this.isIgnored(relativePath) &&
-        this.isIndexableFile(relativePath)
-      ) {
-        filePaths.push(relativePath);
-      }
-    }
-
-    filePaths.sort((a, b) => a.localeCompare(b));
-
-    const fileNodes = await Promise.all(
-      filePaths.map((relativePath) => this.hashFile(relativePath)),
-    );
-
-    const directoryChildren = new Map<string, MerkleNode[]>();
-    directoryChildren.set(".", []);
-
-    for (const fileNode of fileNodes) {
-      const dirPath = posix.dirname(fileNode.path);
-      this.ensureDirectoryPath(directoryChildren, dirPath);
-      directoryChildren.get(dirPath)!.push(fileNode);
-    }
-
-    return this.buildDirectoryNode(".", directoryChildren);
-  }
-
-  private async hashFile(relativePath: string): Promise<MerkleNode> {
-    const absolutePath = join(this.rootDir, ...relativePath.split("/"));
-    const file = Bun.file(absolutePath);
-    const content = await file.bytes();
-    const hash = Bun.CryptoHasher.hash("sha256", content, "hex");
-
-    return {
-      path: relativePath,
-      type: "file",
-      hash,
-      size: file.size,
-      mtime: file.lastModified,
-    };
-  }
-
-  private ensureDirectoryPath(
-    directoryChildren: Map<string, MerkleNode[]>,
-    dirPath: string,
-  ): void {
-    if (directoryChildren.has(dirPath)) return;
-
-    const parentPath = posix.dirname(dirPath);
-    this.ensureDirectoryPath(directoryChildren, parentPath);
-
-    const directoryNode: MerkleNode = {
-      path: dirPath,
-      type: "directory",
-      hash: "",
-      children: [],
-    };
-
-    directoryChildren.set(dirPath, directoryNode.children!);
-    directoryChildren.get(parentPath)!.push(directoryNode);
-  }
-
-  private buildDirectoryNode(
-    path: string,
-    directoryChildren: Map<string, MerkleNode[]>,
-  ): MerkleNode {
-    const children = directoryChildren.get(path) ?? [];
-
-    for (let i = 0; i < children.length; i++) {
-      const child = children[i]!;
-      if (child.type === "directory") {
-        children[i] = this.buildDirectoryNode(child.path, directoryChildren);
-      }
-    }
-
-    children.sort((a, b) => a.path.localeCompare(b.path));
-
-    const hash = Bun.CryptoHasher.hash(
-      "sha256",
-      children.map((child) => child.hash).join("\n"),
-      "hex",
-    );
-
-    return {
-      path,
-      type: "directory",
-      hash,
-      children,
-    };
-  }
+  static deserialize = deserializeTree;
 }

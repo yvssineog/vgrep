@@ -1,8 +1,7 @@
 import { resolve } from "node:path";
 import { MerkleTree, computeSimhash } from "@vgrep/core";
-import { c, header, row } from "../style";
+import { c, formatBytes, header, row } from "../style";
 import { isInitialized, readMerkleJson, readConfig } from "../config";
-import { formatBytes } from "./util";
 
 /**
  * `vgrep status` — Display the current index status and tree statistics.

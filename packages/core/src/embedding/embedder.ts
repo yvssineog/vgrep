@@ -1,71 +1,77 @@
 import { embed, embedMany } from "ai";
+import { Effect } from "effect";
 import type { EmbeddingModelV2 } from "@ai-sdk/provider";
 import type { CodeChunk, IndexEntry } from "../types";
-import { EmbeddingCache } from "./cache";
+import { readCachedVector, writeCachedVector } from "./cache";
+import { tryAsync } from "../util/effect";
 
 export type EmbeddingModel = EmbeddingModelV2<string>;
 
+/** Cap on parallel filesystem ops for the cache. */
+const CACHE_CONCURRENCY = 32;
+
+const toEntry = (chunk: CodeChunk, vector: number[]): IndexEntry => ({
+  filePath: chunk.filePath,
+  chunkHash: chunk.chunkHash,
+  content: chunk.content,
+  startLine: chunk.startLine,
+  endLine: chunk.endLine,
+  language: chunk.language,
+  vector,
+});
+
+/** Embed a single string via the AI SDK's `embed`. */
+export const embedTextEffect = (
+  model: EmbeddingModel,
+  text: string,
+): Effect.Effect<number[], Error> =>
+  tryAsync(() => embed({ model, value: text }).then((r) => r.embedding));
+
 /**
- * Embeds chunks via the AI SDK, persisting vectors keyed by chunk hash so
- * unchanged code skips the model entirely on subsequent runs.
+ * Embed `chunks` with cache-first lookups. Cache reads/writes are bounded
+ * by `CACHE_CONCURRENCY` (no unbounded `Promise.all`). Cache misses go out
+ * in a single bulk `embedMany` call so the SDK can batch optimally.
  */
-export class CachedEmbedder {
-  private readonly cache: EmbeddingCache;
-
-  constructor(
-    cacheDir: string,
-    private readonly model: EmbeddingModel,
-  ) {
-    this.cache = new EmbeddingCache(cacheDir);
-  }
-
-  async embedText(text: string): Promise<number[]> {
-    const { embedding } = await embed({ model: this.model, value: text });
-    return embedding;
-  }
-
-  async embedChunks(chunks: CodeChunk[]): Promise<IndexEntry[]> {
-    const entries = new Array<IndexEntry | null>(chunks.length).fill(null);
-    const missing: { index: number; chunk: CodeChunk }[] = [];
-
-    await Promise.all(
-      chunks.map(async (chunk, index) => {
-        const cached = await this.cache.get(chunk.chunkHash);
-        if (cached) {
-          entries[index] = toEntry(chunk, cached);
-        } else {
-          missing.push({ index, chunk });
-        }
-      }),
+export const embedChunksEffect = (
+  cacheDir: string,
+  model: EmbeddingModel,
+  chunks: CodeChunk[],
+): Effect.Effect<IndexEntry[], Error> =>
+  Effect.gen(function* () {
+    const lookups = yield* Effect.forEach(
+      chunks,
+      (chunk, index) =>
+        Effect.map(readCachedVector(cacheDir, chunk.chunkHash), (cached) => ({
+          chunk,
+          index,
+          cached,
+        })),
+      { concurrency: CACHE_CONCURRENCY },
     );
 
-    if (missing.length > 0) {
-      const { embeddings } = await embedMany({
-        model: this.model,
-        values: missing.map(({ chunk }) => chunk.content),
-      });
-
-      await Promise.all(
-        missing.map(async ({ index, chunk }, i) => {
-          const vector = embeddings[i]!;
-          await this.cache.set(chunk.chunkHash, vector);
-          entries[index] = toEntry(chunk, vector);
-        }),
-      );
+    const entries = new Array<IndexEntry | null>(chunks.length).fill(null);
+    const missing: { index: number; chunk: CodeChunk }[] = [];
+    for (const { chunk, index, cached } of lookups) {
+      if (cached) entries[index] = toEntry(chunk, cached);
+      else missing.push({ index, chunk });
     }
 
-    return entries as IndexEntry[];
-  }
-}
+    if (missing.length === 0) return entries as IndexEntry[];
 
-function toEntry(chunk: CodeChunk, vector: number[]): IndexEntry {
-  return {
-    filePath: chunk.filePath,
-    chunkHash: chunk.chunkHash,
-    content: chunk.content,
-    startLine: chunk.startLine,
-    endLine: chunk.endLine,
-    language: chunk.language,
-    vector,
-  };
-}
+    const { embeddings } = yield* tryAsync(() =>
+      embedMany({ model, values: missing.map(({ chunk }) => chunk.content) }),
+    );
+
+    yield* Effect.forEach(
+      missing,
+      ({ index, chunk }, i) =>
+        Effect.gen(function* () {
+          const vector = embeddings[i]!;
+          yield* writeCachedVector(cacheDir, chunk.chunkHash, vector);
+          entries[index] = toEntry(chunk, vector);
+        }),
+      { concurrency: CACHE_CONCURRENCY },
+    );
+
+    return entries as IndexEntry[];
+  });
