@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "vgrep": {
+      "source": "yvssineog/vgrep",
+      "sourceType": "github",
+      "skillPath": "skills/vgrep/SKILL.md",
+      "computedHash": "76d9ac7c4611801e880c3dd18de73bb17dde453f8e92dbd46bbf1cd101edf450"
+    }
+  }
+}

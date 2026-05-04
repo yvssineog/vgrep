@@ -1,0 +1,10 @@
+{
+  "name": "zod",
+  "repo": "https://github.com/colinhacks/zod.git",
+  "revision": "v3.23.0",
+  "query": "Where is the .refine() method implemented for Zod schemas, and what does its implementation do at a high level? Name the file and the surrounding function.",
+  "expectations": {
+    "pathSubstring": "types",
+    "answerMustInclude": ["refine"]
+  }
+}

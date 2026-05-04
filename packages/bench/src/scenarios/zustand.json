@@ -1,0 +1,10 @@
+{
+  "name": "zustand",
+  "repo": "https://github.com/pmndrs/zustand.git",
+  "revision": "v5.0.0",
+  "query": "Where does Zustand's create() function build the store, and how does the middleware composition work? Name the file and the entry function.",
+  "expectations": {
+    "pathSubstring": "src",
+    "answerMustInclude": ["create"]
+  }
+}

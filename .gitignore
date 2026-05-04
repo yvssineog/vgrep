@@ -15,6 +15,9 @@ packages/cli/src/vgrep.exe
 .vgrep/
 dev/
 
+# Bench artifacts
+packages/bench/results/
+
 # OS files
 .DS_Store
 Thumbs.db

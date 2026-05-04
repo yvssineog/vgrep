@@ -8,7 +8,8 @@
     "dev": "bun sst dev",
     "test": "bun test --recursive",
     "lint": "tsc --noEmit",
-    "vgrep": "bun packages/cli/src/cli.ts"
+    "vgrep": "bun packages/cli/src/cli.ts",
+    "bench": "bun packages/bench/src/run.ts"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
