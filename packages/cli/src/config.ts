@@ -11,7 +11,7 @@ export const VGREP_DIR = ".vgrep";
 export const FILES = {
   config: "config.json",
   merkle: "merkle.json",
-  lancedb: "lancedb",
+  index: "index.db",
   cache: "cache",
   watchPid: "watch.pid",
   watchLog: "watch.log",
@@ -30,7 +30,6 @@ export function vgrepDir(projectRoot: string): string {
 export async function ensureVgrepDir(projectRoot: string): Promise<string> {
   const dir = vgrepDir(projectRoot);
   await mkdir(join(dir, FILES.cache), { recursive: true });
-  await mkdir(join(dir, FILES.lancedb), { recursive: true });
   return dir;
 }
 

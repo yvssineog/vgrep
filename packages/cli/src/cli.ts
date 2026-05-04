@@ -160,10 +160,8 @@ function isCommand(name: string): name is CommandName {
   return name in COMMAND_HELP;
 }
 
-try {
-  await main();
-} catch (err) {
+main().catch((err) => {
   const msg = err instanceof Error ? err.message : String(err);
   console.error(`Error: ${msg}`);
   process.exit(1);
-}
+});

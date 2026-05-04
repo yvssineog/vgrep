@@ -19,7 +19,7 @@ describe("LocalEngine", () => {
   test("upsert inserts searchable rows", async () => {
     const dir = await makeTempDir();
     const engine = new LocalEngine({
-      dbPath: join(dir, "lancedb"),
+      dbPath: join(dir, "index.db"),
       cacheDir: join(dir, "cache"),
       embeddingModel: staticModel,
     });
@@ -59,7 +59,7 @@ describe("LocalEngine", () => {
   test("deleteByFile removes all chunks for a file", async () => {
     const dir = await makeTempDir();
     const engine = new LocalEngine({
-      dbPath: join(dir, "lancedb"),
+      dbPath: join(dir, "index.db"),
       cacheDir: join(dir, "cache"),
       embeddingModel: staticModel,
     });
@@ -98,7 +98,7 @@ describe("LocalEngine", () => {
   test("upsert skips non-finite vectors", async () => {
     const dir = await makeTempDir();
     const engine = new LocalEngine({
-      dbPath: join(dir, "lancedb"),
+      dbPath: join(dir, "index.db"),
       cacheDir: join(dir, "cache"),
       embeddingModel: staticModel,
     });
@@ -126,5 +126,5 @@ describe("LocalEngine", () => {
 async function makeTempDir(): Promise<string> {
   const root = join(process.cwd(), ".tmp-tests");
   await mkdir(root, { recursive: true });
-  return mkdtemp(join(root, "vgrep-lancedb-test-"));
+  return mkdtemp(join(root, "vgrep-engine-test-"));
 }

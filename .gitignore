@@ -4,6 +4,7 @@ node_modules/
 # Build artifacts
 dist/
 packages/cli/src/vgrep.exe
+packages/cli/vgrep
 *.tsbuildinfo
 .tmp-tests/
 
@@ -30,3 +31,8 @@ bun.lock
 .vscode/
 *.swp
 *.swo
+
+# Agent tooling
+.agents/
+.claude/
+skills-lock.json

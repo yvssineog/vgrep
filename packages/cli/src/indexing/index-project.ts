@@ -44,7 +44,7 @@ export async function applyIndexDiff(options: {
 
   const indexStartTime = performance.now();
   const engine = new LocalEngine({
-    dbPath: join(vgrepDir(projectRoot), FILES.lancedb),
+    dbPath: join(vgrepDir(projectRoot), FILES.index),
     cacheDir: join(vgrepDir(projectRoot), FILES.cache),
   });
 
