@@ -103,7 +103,9 @@ vgrep operates in two modes:
 
 ### Incremental Re-indexing
 
-On subsequent runs, vgrep compares Merkle tree hashes top-down. Only directories whose hashes changed are descended into — making re-indexing nearly instant for small code changes.
+In `watch` mode, filesystem events and lightweight metadata polling identify candidate paths first. The Merkle tree is then updated incrementally by re-hashing only those candidates and recalculating parent directory hashes.
+
+On subsequent `init` runs, vgrep compares the previous Merkle snapshot with the current one and only re-indexes changed files.
 
 ---
 
@@ -114,6 +116,10 @@ On subsequent runs, vgrep compares Merkle tree hashes top-down. Only directories
 | `vgrep init` | Build the Merkle tree and index the codebase  |
 | `vgrep status` | Show index stats, root hash, simhash, and mode  |
 | `vgrep search "<query>"` | Search the local semantic index  |
+| `vgrep watch` | Watch the repo in the foreground and keep the local index updated |
+| `vgrep watch --start` | Start the watchdog in the background |
+| `vgrep watch --logs` | Show the latest watchdog logs from `.vgrep/watch.log` |
+| `vgrep watch --stop` | Stop the background watchdog |
 
 ### Options
 
@@ -123,6 +129,10 @@ vgrep init --force               # Index after reviewing .vgrepignore/config
 vgrep init --include docs,data   # Add docs/data to the default code profile
 vgrep init --only code,styles    # Index only selected profiles
 vgrep search "auth flow" --top-k 5
+vgrep watch                      # Keep terminal open and log updates there
+vgrep watch --start              # Run watchdog in the background
+vgrep watch --logs               # Print the latest background logs
+vgrep watch --stop               # Stop the background watchdog
 vgrep --version                  # Show version
 vgrep --help                     # Show help
 ```
