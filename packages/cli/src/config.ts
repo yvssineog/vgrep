@@ -13,6 +13,8 @@ export const FILES = {
   merkle: "merkle.json",
   lancedb: "lancedb",
   cache: "cache",
+  watchPid: "watch.pid",
+  watchLog: "watch.log",
 } as const;
 
 /**

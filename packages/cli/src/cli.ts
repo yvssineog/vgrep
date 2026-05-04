@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import { initCommand } from "./commands/init";
 import { searchCommand } from "./commands/search";
 import { statusCommand } from "./commands/status";
+import { watchCommand } from "./commands/watch";
 
 const VERSION = "0.1.0";
 
@@ -16,6 +17,7 @@ commands
 init            build or update the local index
 search <query>  semantic search over the index
 status          show index stats
+watch           keep the index updated while files change
 
 run "vgrep <command> --help" for command options`;
 
@@ -34,6 +36,12 @@ const COMMAND_HELP = {
   status: `usage: vgrep status [options]
 
 -p, --path <dir>  project root (defaults to cwd)`,
+  watch: `usage: vgrep watch [options]
+
+-p, --path <dir>  project root (defaults to cwd)
+    --start       start the watchdog in the background
+    --logs        show the last watchdog logs
+    --stop        stop the background watchdog`,
 } as const;
 
 type CommandName = keyof typeof COMMAND_HELP;
@@ -112,6 +120,32 @@ async function main(): Promise<void> {
         path: values.path,
         topK: values["top-k"],
       });
+      return;
+    }
+    case "watch": {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          path: { type: "string", short: "p" },
+          start: { type: "boolean" },
+          logs: { type: "boolean" },
+          stop: { type: "boolean" },
+          daemon: { type: "boolean" },
+        },
+        strict: true,
+      });
+      const modes = [
+        values.start,
+        values.logs,
+        values.stop,
+        values.daemon,
+      ].filter(Boolean);
+      if (modes.length > 1) {
+        console.error("Error: use only one of --start, --logs, --stop.\n");
+        console.log(COMMAND_HELP.watch);
+        process.exit(1);
+      }
+      await watchCommand(values);
       return;
     }
     default: {
