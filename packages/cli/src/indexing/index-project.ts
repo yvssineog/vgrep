@@ -28,45 +28,19 @@ export type IndexProjectResult = {
   tree: MerkleTree;
 };
 
-export async function indexProject(options: {
+export type ApplyIndexDiffResult = {
+  deletedFiles: string[];
+  filesToIndex: string[];
+  failedFiles: { path: string; reason: string }[];
+  indexedChunks: number;
+};
+
+export async function applyIndexDiff(options: {
   projectRoot: string;
-  config: VgrepConfig;
-  activeProfiles: string[];
-}): Promise<IndexProjectResult> {
-  const { projectRoot, config, activeProfiles } = options;
-
-  const previousJson = await readMerkleJson(projectRoot);
-  const previousTree: MerkleNode | null = previousJson
-    ? MerkleTree.deserialize(previousJson)
-    : null;
-
-  status("building merkle tree...");
-  const tree = new MerkleTree(
-    projectRoot,
-    [],
-    createIndexableFileMatcher(activeProfiles, config.fileProfiles ?? {}),
-  );
-
-  const startTime = performance.now();
-  await tree.build();
-  const treeMs = performance.now() - startTime;
-
-  const stats = tree.getStats();
-  const fileHashes = tree.collectFileHashes();
-  const simhash = computeSimhash(fileHashes);
-
-  clearStatus();
-  console.log(
-    row(
-      "tree",
-      `${stats.totalFiles} files  ${formatBytes(stats.totalSizeBytes)}  ${formatDuration(treeMs)}`,
-    ),
-  );
-  console.log(row("hash", c.dim(stats.rootHash.slice(0, 16))));
-  console.log(row("simhash", c.dim(simhash)));
-
-  const changes = diffTrees(previousTree, tree.getRoot());
-  logChanges(previousTree, changes);
+  treeJson: string;
+  changes: ChangedFile[];
+}): Promise<ApplyIndexDiffResult> {
+  const { projectRoot, treeJson, changes } = options;
 
   const indexStartTime = performance.now();
   const engine = new LocalEngine({
@@ -152,14 +126,68 @@ export async function indexProject(options: {
     }
   }
 
-  await writeMerkleJson(projectRoot, tree.serialize());
+  await writeMerkleJson(projectRoot, treeJson);
 
   return {
-    changes,
     deletedFiles,
     filesToIndex,
     failedFiles,
     indexedChunks: entries.length,
+  };
+}
+
+export async function indexProject(options: {
+  projectRoot: string;
+  config: VgrepConfig;
+  activeProfiles: string[];
+}): Promise<IndexProjectResult> {
+  const { projectRoot, config, activeProfiles } = options;
+
+  const previousJson = await readMerkleJson(projectRoot);
+  const previousTree: MerkleNode | null = previousJson
+    ? MerkleTree.deserialize(previousJson)
+    : null;
+
+  status("building merkle tree...");
+  const tree = new MerkleTree(
+    projectRoot,
+    [],
+    createIndexableFileMatcher(activeProfiles, config.fileProfiles ?? {}),
+  );
+
+  const startTime = performance.now();
+  await tree.build();
+  const treeMs = performance.now() - startTime;
+
+  const stats = tree.getStats();
+  const fileHashes = tree.collectFileHashes();
+  const simhash = computeSimhash(fileHashes);
+
+  clearStatus();
+  console.log(
+    row(
+      "tree",
+      `${stats.totalFiles} files  ${formatBytes(stats.totalSizeBytes)}  ${formatDuration(treeMs)}`,
+    ),
+  );
+  console.log(row("hash", c.dim(stats.rootHash.slice(0, 16))));
+  console.log(row("simhash", c.dim(simhash)));
+
+  const changes = diffTrees(previousTree, tree.getRoot());
+  logChanges(previousTree, changes);
+
+  const applied = await applyIndexDiff({
+    projectRoot,
+    treeJson: tree.serialize(),
+    changes,
+  });
+
+  return {
+    changes,
+    deletedFiles: applied.deletedFiles,
+    filesToIndex: applied.filesToIndex,
+    failedFiles: applied.failedFiles,
+    indexedChunks: applied.indexedChunks,
     previousTree,
     simhash,
     tree,
