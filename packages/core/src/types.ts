@@ -93,3 +93,4 @@ export interface TreeStats {
   totalSizeBytes: number;
   rootHash: string;
 }
+

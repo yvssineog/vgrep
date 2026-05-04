@@ -7,7 +7,12 @@ import {
   chunkFile,
   LocalEngine,
 } from "@vgrep/core";
-import type { ChangedFile, MerkleNode, VgrepConfig } from "@vgrep/core";
+import type {
+  ChangedFile,
+  CodeChunk,
+  MerkleNode,
+  VgrepConfig,
+} from "@vgrep/core";
 import { c, clearStatus, row, status } from "../style";
 import {
   FILES,
@@ -60,49 +65,88 @@ export async function applyIndexDiff(options: {
     .map((ch) => ch.path);
 
   console.log();
-  status("chunking...");
-  const chunkStart = performance.now();
-  let chunkedFiles = 0;
   const failedFiles: { path: string; reason: string }[] = [];
-  const chunkGroups = await mapWithConcurrency(
+
+  const chunkOne = async (filePath: string): Promise<CodeChunk[]> => {
+    const absolutePath = join(projectRoot, ...filePath.split("/"));
+    try {
+      const content = await Bun.file(absolutePath).text();
+      return await chunkFile(filePath, content);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      failedFiles.push({ path: filePath, reason });
+      return [];
+    }
+  };
+
+  // Pipeline: chunking workers feed a bounded buffer; embed+upsert drains
+  // it in batches. While we await embedding, chunking workers keep producing,
+  // and the previous batch's upsert overlaps with the next batch's embed.
+  let chunkedFiles = 0;
+  let producedChunks = 0;
+  let embeddedChunks = 0;
+  let entriesWritten = 0;
+  let chunkMs = 0;
+  let embedMs = 0;
+  let upsertMs = 0;
+  const chunkPhaseStart = performance.now();
+
+  const buffer: CodeChunk[] = [];
+  let pendingUpsert: Promise<void> = Promise.resolve();
+
+  const flushBatch = async (batch: CodeChunk[]): Promise<void> => {
+    const embedStart = performance.now();
+    const entries = await engine.embedChunks(batch);
+    embedMs += performance.now() - embedStart;
+    embeddedChunks += batch.length;
+
+    // Backpressure: don't pile up upsert work; one batch in flight at a time.
+    await pendingUpsert;
+    pendingUpsert = (async () => {
+      const upsertStart = performance.now();
+      await engine.upsert(entries);
+      upsertMs += performance.now() - upsertStart;
+      entriesWritten += entries.length;
+    })();
+  };
+
+  status("chunking...");
+  for await (const chunks of streamWithConcurrency(
     filesToIndex,
-    8,
-    async (filePath) => {
-      const absolutePath = join(projectRoot, ...filePath.split("/"));
-      try {
-        const content = await Bun.file(absolutePath).text();
-        const chunks = await chunkFile(filePath, content);
-        chunkedFiles += 1;
-        status(`chunking ${chunkedFiles}/${filesToIndex.length} ${filePath}`);
-        return chunks;
-      } catch (err) {
-        chunkedFiles += 1;
-        const reason = err instanceof Error ? err.message : String(err);
-        failedFiles.push({ path: filePath, reason });
-        return [];
-      }
-    },
-  );
-  const chunkMs = performance.now() - chunkStart;
+    CHUNK_CONCURRENCY,
+    chunkOne,
+  )) {
+    chunkedFiles += 1;
+    if (chunks.length > 0) {
+      buffer.push(...chunks);
+      producedChunks += chunks.length;
+    }
+    status(
+      `chunk ${chunkedFiles}/${filesToIndex.length}  embed ${embeddedChunks}/${producedChunks}`,
+    );
 
-  const chunks = chunkGroups.flat();
+    while (buffer.length >= EMBED_BATCH_SIZE) {
+      const batch = buffer.splice(0, EMBED_BATCH_SIZE);
+      await flushBatch(batch);
+      status(
+        `chunk ${chunkedFiles}/${filesToIndex.length}  embed ${embeddedChunks}/${producedChunks}`,
+      );
+    }
+  }
+  chunkMs = performance.now() - chunkPhaseStart;
 
-  status(`embedding ${chunks.length} chunks...`);
-  const embedStart = performance.now();
-  const entries = await engine.embedChunks(chunks);
-  const embedMs = performance.now() - embedStart;
+  if (buffer.length > 0) {
+    await flushBatch(buffer.splice(0));
+  }
+  await pendingUpsert;
 
-  status(`writing ${entries.length} vectors...`);
-  const upsertStart = performance.now();
-  await engine.upsert(entries);
-  const upsertMs = performance.now() - upsertStart;
   const indexMs = performance.now() - indexStartTime;
   clearStatus();
 
   console.log(
     row(
       "indexed",
-      `${c.bold(entries.length)} chunks from ${c.bold(filesToIndex.length)} files  ${formatDuration(indexMs)}`,
+      `${c.bold(entriesWritten)} chunks from ${c.bold(filesToIndex.length)} files  ${formatDuration(indexMs)}`,
     ),
   );
   if (deletedFiles.length > 0) {
@@ -132,7 +176,7 @@ export async function applyIndexDiff(options: {
     deletedFiles,
     filesToIndex,
     failedFiles,
-    indexedChunks: entries.length,
+    indexedChunks: entriesWritten,
   };
 }
 
@@ -240,26 +284,49 @@ function logChanges(
   }
 }
 
-async function mapWithConcurrency<T, R>(
+/** Worker fan-out for file chunking. Tree-sitter is CPU-bound; 8 ≈ saturates. */
+const CHUNK_CONCURRENCY = 8;
+
+/** Chunks per embed call. Aligned to roughly 8 × transformersEmbedding's
+ *  internal maxEmbeddingsPerCall (32) so we don't fragment doEmbed batches,
+ *  while still bounding peak memory and surfacing progress frequently. */
+const EMBED_BATCH_SIZE = 256;
+
+/**
+ * Run `worker` over `items` with bounded concurrency, yielding each result
+ * as soon as it completes. Order is completion order, not input order.
+ */
+async function* streamWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
   worker: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
+): AsyncGenerator<R> {
+  const limit = Math.min(concurrency, items.length);
+  if (limit === 0) return;
+
+  type Settled = { key: number; result: R };
+  const inflight = new Map<number, Promise<Settled>>();
   let cursor = 0;
-  const run = async () => {
-    while (true) {
+  let nextKey = 0;
+
+  const launch = (): void => {
+    while (inflight.size < limit && cursor < items.length) {
       const i = cursor++;
-      if (i >= items.length) return;
-      results[i] = await worker(items[i]!, i);
+      const key = nextKey++;
+      inflight.set(
+        key,
+        worker(items[i]!, i).then((result) => ({ key, result })),
+      );
     }
   };
-  const workers = Array.from(
-    { length: Math.min(concurrency, items.length) },
-    run,
-  );
-  await Promise.all(workers);
-  return results;
+
+  launch();
+  while (inflight.size > 0) {
+    const settled = await Promise.race(inflight.values());
+    inflight.delete(settled.key);
+    yield settled.result;
+    launch();
+  }
 }
 
 function formatDuration(ms: number): string {
