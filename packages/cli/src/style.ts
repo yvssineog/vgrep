@@ -30,3 +30,25 @@ export const c = {
   boldBlue: make(["bold", "blue"]),
   boldMagenta: make(["bold", "magenta"]),
 };
+
+const LABEL_WIDTH = 8;
+
+export function row(label: string, value: string | number): string {
+  return `${c.dim(label.padEnd(LABEL_WIDTH))} ${value}`;
+}
+
+export function header(command: string, subject: string): string {
+  return `${c.bold(`vgrep ${command}`)} ${c.dim(subject)}`;
+}
+
+export function status(text: string): void {
+  if (process.stdout.isTTY) {
+    process.stdout.write(`\r\x1b[2K${c.dim(text)}`);
+  } else {
+    console.log(text);
+  }
+}
+
+export function clearStatus(): void {
+  if (process.stdout.isTTY) process.stdout.write(`\r\x1b[2K`);
+}

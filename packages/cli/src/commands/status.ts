@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { MerkleTree, computeSimhash } from "@vgrep/core";
-import { c } from "../style";
+import { c, header, row } from "../style";
 import { isInitialized, readMerkleJson, readConfig } from "../config";
 import { formatBytes } from "./util";
 
@@ -12,29 +12,25 @@ export async function statusCommand(options: {
 }): Promise<void> {
   const projectRoot = resolve(options.path ?? process.cwd());
 
-  console.log(c.boldCyan("\n📊 vgrep status"), c.dim(`— ${projectRoot}\n`));
+  console.log(header("status", projectRoot));
 
   if (!isInitialized(projectRoot)) {
-    console.log(
-      c.red("✗ Not initialized."),
-      c.dim('Run "vgrep init" first.\n'),
-    );
+    console.log(`${c.red("not initialized")} ${c.dim('— run "vgrep init"')}`);
     process.exit(1);
   }
 
   const config = await readConfig(projectRoot);
   console.log(
-    c.dim("  Mode:"),
-    config.mode === "cloud" ? c.boldBlue("☁ Cloud") : c.boldGreen("💻 Local"),
+    row("mode", config.mode === "cloud" ? c.blue("cloud") : c.green("local")),
   );
 
   if (config.mode === "cloud" && config.backendUrl) {
-    console.log(c.dim("  Backend:"), c.underline(config.backendUrl));
+    console.log(row("backend", c.underline(config.backendUrl)));
   }
 
   const merkleJson = await readMerkleJson(projectRoot);
   if (!merkleJson) {
-    console.log(c.red("\n✗ No Merkle tree found.\n"));
+    console.log(c.red("no merkle tree found"));
     process.exit(1);
   }
 
@@ -57,11 +53,9 @@ export async function statusCommand(options: {
   };
   walk(root);
 
-  console.log(c.dim("\n  ├─"), `Files: ${c.bold(totalFiles)}`);
-  console.log(c.dim("  ├─"), `Directories: ${c.bold(totalDirs)}`);
-  console.log(c.dim("  ├─"), `Total size: ${c.bold(formatBytes(totalSize))}`);
-  console.log(c.dim("  └─"), `Root hash: ${c.yellow(root.hash.slice(0, 16))}…`);
-
-  const simhash = computeSimhash(fileHashes);
-  console.log(c.dim("\n  Simhash:"), c.boldMagenta(simhash), "\n");
+  console.log(row("files", totalFiles));
+  console.log(row("dirs", totalDirs));
+  console.log(row("size", formatBytes(totalSize)));
+  console.log(row("hash", c.dim(root.hash.slice(0, 16))));
+  console.log(row("simhash", c.dim(computeSimhash(fileHashes))));
 }

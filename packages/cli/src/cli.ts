@@ -7,32 +7,32 @@ import { statusCommand } from "./commands/status";
 
 const VERSION = "0.1.0";
 
-const HELP = `vgrep ${VERSION} — Vector Grep — Semantic search for your codebase, local-first.
+const HELP = `vgrep ${VERSION} semantic search for your codebase, local-first
 
-Usage:
-  vgrep <command> [options]
+usage
+vgrep <command> [options]
 
-Commands:
-  init              Build (or rebuild) the Merkle tree index for the current project
-  search <query>    Semantic search over the local vector index
-  status            Display current index status and tree statistics
+commands
+init            build or update the local index
+search <query>  semantic search over the index
+status          show index stats
 
-Run "vgrep <command> --help" for command-specific options.`;
+run "vgrep <command> --help" for command options`;
 
 const COMMAND_HELP = {
-  init: `Usage: vgrep init [options]
+  init: `usage: vgrep init [options]
 
-  -p, --path <dir>      Project root directory (defaults to cwd)
-  -f, --force           Continue indexing after scaffolding .vgrepignore
-      --include <names> Comma-separated file profiles to add to defaultProfiles
-      --only <names>    Comma-separated file profiles to use instead of defaultProfiles`,
-  search: `Usage: vgrep search [options] <query...>
+-p, --path <dir>       project root (defaults to cwd)
+-f, --force            continue indexing after scaffolding .vgrepignore
+    --include <names>  comma-separated profiles to add to defaultProfiles
+    --only <names>     comma-separated profiles to use instead of defaultProfiles`,
+  search: `usage: vgrep search [options] <query...>
 
-  -p, --path <dir>      Project root directory (defaults to cwd)
-  -k, --top-k <n>       Number of results to return (default: 10)`,
-  status: `Usage: vgrep status [options]
+-p, --path <dir>  project root (defaults to cwd)
+-k, --top-k <n>   number of results (default: 3)`,
+  status: `usage: vgrep status [options]
 
-  -p, --path <dir>      Project root directory (defaults to cwd)`,
+-p, --path <dir>  project root (defaults to cwd)`,
 } as const;
 
 type CommandName = keyof typeof COMMAND_HELP;

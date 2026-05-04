@@ -8,8 +8,7 @@ import {
   LocalEngine,
 } from "@vgrep/core";
 import type { MerkleNode, VgrepConfig } from "@vgrep/core";
-import ora from "ora";
-import { c } from "../style";
+import { c, clearStatus, header, row, status } from "../style";
 import { formatBytes } from "./util";
 
 import {
@@ -35,40 +34,33 @@ export async function initCommand(options: {
 }): Promise<void> {
   const projectRoot = resolve(options.path ?? process.cwd());
 
-  console.log(c.boldCyan("\n⚡ vgrep init"), c.dim(`— ${projectRoot}\n`));
+  console.log(header("init", projectRoot));
 
-  // 1. Ensure .vgrep/config.json and .vgrepignore are scaffolded
   const config = await ensureConfig(projectRoot);
   const activeProfiles = resolveProfiles(config, options);
-  console.log(c.dim("  Profiles:"), c.bold(activeProfiles.join(", ")));
+  console.log(row("profiles", activeProfiles.join(", ")));
 
   const createdIgnore = await ensureVgrepIgnore(projectRoot);
   if (createdIgnore) {
-    console.log(c.dim("  -"), c.green("Scaffolded default .vgrepignore"));
+    console.log(row("scaffold", c.green(".vgrepignore created")));
     if (!options.force) {
+      console.log();
       console.log(
-        c.yellow(
-          "\n.vgrepignore and .vgrep/config.json are ready. Review them, add custom profiles if needed, then run:",
-        ),
+        `${c.dim("review .vgrepignore + .vgrep/config.json, then run")} ${c.bold("vgrep init")}`,
       );
-      console.log(c.cyan("  vgrep init\n"));
       console.log(
-        c.dim(
-          "  Tip: use vgrep init --force to scaffold and index in one command.\n",
-        ),
+        `${c.dim("or skip with")} ${c.bold("vgrep init --force")}`,
       );
       return;
     }
   }
 
-  // 2. Load previous Merkle tree (if any)
   const previousJson = await readMerkleJson(projectRoot);
   const previousTree: MerkleNode | null = previousJson
     ? MerkleTree.deserialize(previousJson)
     : null;
 
-  // 3. Build the new Merkle tree
-  const spinner = ora("Building Merkle tree...").start();
+  status("building merkle tree...");
   const tree = new MerkleTree(
     projectRoot,
     [],
@@ -77,77 +69,81 @@ export async function initCommand(options: {
 
   const startTime = performance.now();
   await tree.build();
-  const elapsed = (performance.now() - startTime).toFixed(0);
+  const treeMs = performance.now() - startTime;
 
-  spinner.succeed(c.green(`Merkle tree built in ${c.bold(elapsed + "ms")}`));
-
-  // 4. Get stats
   const stats = tree.getStats();
-  console.log(c.dim("  ├─"), `Files: ${c.bold(stats.totalFiles)}`);
-  console.log(c.dim("  ├─"), `Directories: ${c.bold(stats.totalDirectories)}`);
-  console.log(
-    c.dim("  ├─"),
-    `Total size: ${c.bold(formatBytes(stats.totalSizeBytes))}`,
-  );
-  console.log(
-    c.dim("  └─"),
-    `Root hash: ${c.yellow(stats.rootHash.slice(0, 16))}…`,
-  );
-
-  // 5. Compute simhash
   const fileHashes = tree.collectFileHashes();
   const simhash = computeSimhash(fileHashes);
-  console.log(c.dim("\n  Simhash:"), c.boldMagenta(simhash), "\n");
 
-  // 6. Diff against previous tree
+  clearStatus();
+  console.log(
+    row(
+      "tree",
+      `${stats.totalFiles} files  ${formatBytes(stats.totalSizeBytes)}  ${formatDuration(treeMs)}`,
+    ),
+  );
+  console.log(row("hash", c.dim(stats.rootHash.slice(0, 16))));
+  console.log(row("simhash", c.dim(simhash)));
+
   const changes = diffTrees(previousTree, tree.getRoot());
 
-  if (previousTree) {
-    if (changes.length === 0) {
-      console.log(c.green("✓ No files changed since last index.\n"));
-    } else {
-      console.log(
-        c.yellow(`⚠ ${changes.length} file(s) changed since last index:\n`),
-      );
-      const maxShow = 20;
-      for (const change of changes.slice(0, maxShow)) {
-        const icon =
-          change.type === "added"
-            ? c.green("+")
-            : change.type === "deleted"
-              ? c.red("-")
-              : c.yellow("~");
-        console.log(`  ${icon} ${change.path}`);
-      }
-      if (changes.length > maxShow) {
-        console.log(c.dim(`  ... and ${changes.length - maxShow} more\n`));
-      }
-      console.log();
-    }
+  if (!previousTree) {
+    console.log(row("changes", `first index, ${changes.length} files`));
+  } else if (changes.length === 0) {
+    console.log(row("changes", c.green("none")));
   } else {
-    console.log(c.green(`✓ First index: ${changes.length} file(s) indexed.\n`));
+    const counts = changes.reduce(
+      (acc, ch) => {
+        acc[ch.type]++;
+        return acc;
+      },
+      { added: 0, deleted: 0, modified: 0 },
+    );
+    const summary = [
+      counts.modified && c.yellow(`${counts.modified} modified`),
+      counts.added && c.green(`${counts.added} added`),
+      counts.deleted && c.red(`${counts.deleted} deleted`),
+    ]
+      .filter(Boolean)
+      .join(c.dim(", "));
+    console.log(row("changes", summary));
+
+    const maxShow = 10;
+    console.log();
+    for (const change of changes.slice(0, maxShow)) {
+      const marker =
+        change.type === "added"
+          ? c.green("A")
+          : change.type === "deleted"
+            ? c.red("D")
+            : c.yellow("M");
+      console.log(`${marker} ${c.dim(change.path)}`);
+    }
+    if (changes.length > maxShow) {
+      console.log(c.dim(`… ${changes.length - maxShow} more`));
+    }
   }
 
-  // 7. Index changed files into LanceDB
-  const indexSpinner = ora("Indexing changed chunks...").start();
   const indexStartTime = performance.now();
   const engine = new LocalEngine({
     dbPath: join(vgrepDir(projectRoot), FILES.lancedb),
     cacheDir: join(vgrepDir(projectRoot), FILES.cache),
   });
 
-  const deleteStartTime = performance.now();
+  const deleteStart = performance.now();
   const deletedFiles = changes
-    .filter((change) => change.type === "deleted")
-    .map((change) => change.path);
+    .filter((ch) => ch.type === "deleted")
+    .map((ch) => ch.path);
   await engine.deleteByFile(deletedFiles);
-  const deleteElapsed = performance.now() - deleteStartTime;
+  const deleteMs = performance.now() - deleteStart;
 
   const filesToIndex = changes
-    .filter((change) => change.type !== "deleted")
-    .map((change) => change.path);
+    .filter((ch) => ch.type !== "deleted")
+    .map((ch) => ch.path);
 
-  const chunkStartTime = performance.now();
+  console.log();
+  status("chunking...");
+  const chunkStart = performance.now();
   let chunkedFiles = 0;
   const chunkGroups = await mapWithConcurrency(
     filesToIndex,
@@ -157,61 +153,40 @@ export async function initCommand(options: {
       const content = await Bun.file(absolutePath).text();
       const chunks = await chunkFile(filePath, content);
       chunkedFiles += 1;
-      indexSpinner.text = formatIndexProgress(
-        "Chunked",
-        chunkedFiles,
-        filesToIndex.length,
-        filePath,
-      );
+      status(`chunking ${chunkedFiles}/${filesToIndex.length} ${filePath}`);
       return chunks;
     },
   );
-  const chunkElapsed = performance.now() - chunkStartTime;
+  const chunkMs = performance.now() - chunkStart;
 
   const chunks = chunkGroups.flat();
-  const embedStartTime = performance.now();
-  indexSpinner.text = `Embedding ${chunks.length} chunk(s) locally...`;
+
+  status(`embedding ${chunks.length} chunks...`);
+  const embedStart = performance.now();
   const entries = await engine.embedChunks(chunks);
-  const embedElapsed = performance.now() - embedStartTime;
+  const embedMs = performance.now() - embedStart;
 
-  const upsertStartTime = performance.now();
-  indexSpinner.text = `Writing ${entries.length} chunk vector(s) to LanceDB...`;
+  status(`writing ${entries.length} vectors...`);
+  const upsertStart = performance.now();
   await engine.upsert(entries);
-  const upsertElapsed = performance.now() - upsertStartTime;
-  const indexElapsed = performance.now() - indexStartTime;
+  const upsertMs = performance.now() - upsertStart;
+  const indexMs = performance.now() - indexStartTime;
+  clearStatus();
 
-  indexSpinner.succeed(
-    c.green(
-      `Indexed ${c.bold(entries.length)} chunk(s) from ${c.bold(
-        filesToIndex.length,
-      )} changed file(s) in ${c.bold(formatDuration(indexElapsed))}`,
+  console.log(
+    row(
+      "indexed",
+      `${c.bold(entries.length)} chunks from ${c.bold(filesToIndex.length)} files  ${formatDuration(indexMs)}`,
     ),
   );
-  console.log(
-    c.dim("  -"),
-    `Delete stale vectors: ${c.bold(formatDuration(deleteElapsed))}`,
-  );
-  console.log(
-    c.dim("  -"),
-    `Read + chunk files: ${c.bold(formatDuration(chunkElapsed))}`,
-  );
-  console.log(
-    c.dim("  -"),
-    `Embed/cache chunks: ${c.bold(formatDuration(embedElapsed))}`,
-  );
-  console.log(
-    c.dim("  -"),
-    `LanceDB upsert: ${c.bold(formatDuration(upsertElapsed))}`,
-  );
+  if (deletedFiles.length > 0) {
+    console.log(row("delete", c.dim(formatDuration(deleteMs))));
+  }
+  console.log(row("chunk", c.dim(formatDuration(chunkMs))));
+  console.log(row("embed", c.dim(formatDuration(embedMs))));
+  console.log(row("upsert", c.dim(formatDuration(upsertMs))));
 
-  // 8. Persist the new tree only after indexing succeeds
   await writeMerkleJson(projectRoot, tree.serialize());
-
-  console.log(
-    c.dim("  Index saved to"),
-    c.underline(`.vgrep/merkle.json`),
-    "\n",
-  );
 }
 
 async function mapWithConcurrency<T, R>(
@@ -275,14 +250,4 @@ function parseProfileList(value?: string): string[] {
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms.toFixed(0)}ms`;
   return `${(ms / 1000).toFixed(2)}s`;
-}
-
-function formatIndexProgress(
-  phase: string,
-  current: number,
-  total: number,
-  filePath: string,
-): string {
-  const safeTotal = Math.max(total, 1);
-  return `${phase} [${Math.min(current, safeTotal)}/${safeTotal}] ${filePath}`;
 }

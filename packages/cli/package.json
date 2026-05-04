@@ -13,7 +13,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@vgrep/core": "workspace:*",
-    "ora": "^8.2.0"
+    "@vgrep/core": "workspace:*"
   }
 }

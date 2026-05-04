@@ -36,7 +36,8 @@ export function transformersEmbedding(
   > => {
     if (!extractorPromise) {
       extractorPromise = import("@huggingface/transformers").then(
-        ({ pipeline }) => pipeline("feature-extraction", modelId),
+        ({ pipeline }) =>
+          pipeline("feature-extraction", modelId, { dtype: "fp32" }),
       );
     }
     return extractorPromise as Promise<
