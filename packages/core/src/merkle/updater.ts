@@ -1,5 +1,3 @@
-import { relative, isAbsolute, join, posix } from "node:path";
-import { stat } from "node:fs/promises";
 import type { ChangedFile, MerkleNode } from "../types";
 import { isIndexableTextFile } from "../chunking/languages";
 
@@ -83,20 +81,14 @@ export class MerkleTreeUpdater {
     path: string,
     changes: ChangedFile[],
   ): Promise<void> {
-    const absolutePath = join(this.rootDir, ...path.split("/"));
-    const stats = await stat(absolutePath).catch(() => null);
+    const absolutePath = joinPath(this.rootDir, path);
+    const file = Bun.file(absolutePath);
+    const exists = await file.exists();
 
-    if (!stats) {
+    if (!exists) {
       this.deletePath(path, changes);
       return;
     }
-
-    if (stats.isDirectory()) {
-      await this.updateDirectory(path, changes);
-      return;
-    }
-
-    if (!stats.isFile()) return;
 
     if (this.isIgnored(path) || !this.isIndexableFile(path)) {
       this.deletePath(path, changes);
@@ -120,7 +112,7 @@ export class MerkleTreeUpdater {
     const glob = new Bun.Glob("**/*");
 
     for await (const child of glob.scan({
-      cwd: join(this.rootDir, ...path.split("/")),
+      cwd: joinPath(this.rootDir, path),
       dot: true,
       onlyFiles: true,
     })) {
@@ -180,7 +172,7 @@ export class MerkleTreeUpdater {
     if (this.ignoreLoaded) return;
     this.ignoreLoaded = true;
 
-    const ignoreFile = Bun.file(join(this.rootDir, VGREPIGNORE_FILE));
+    const ignoreFile = Bun.file(joinPath(this.rootDir, VGREPIGNORE_FILE));
     if (!(await ignoreFile.exists())) return;
 
     const content = await ignoreFile.text();
@@ -189,7 +181,7 @@ export class MerkleTreeUpdater {
 
   private isIgnored(relativePath: string): boolean {
     const normalizedPath = normalizeRelativePath(relativePath);
-    const name = posix.basename(normalizedPath);
+    const name = basename(normalizedPath);
     const segments = normalizedPath.split("/");
 
     if (
@@ -232,7 +224,7 @@ async function hashFile(
   rootDir: string,
   relativePath: string,
 ): Promise<MerkleNode> {
-  const absolutePath = join(rootDir, ...relativePath.split("/"));
+  const absolutePath = joinPath(rootDir, relativePath);
   const file = Bun.file(absolutePath);
   const content = await file.bytes();
   const hash = Bun.CryptoHasher.hash("sha256", content, "hex");
@@ -251,7 +243,7 @@ function buildRootFromLeaves(leaves: Map<string, MerkleNode>): MerkleNode {
   directoryChildren.set(".", []);
 
   for (const fileNode of leaves.values()) {
-    const dirPath = posix.dirname(fileNode.path);
+    const dirPath = dirname(fileNode.path);
     ensureDirectoryPath(directoryChildren, dirPath);
     directoryChildren.get(dirPath)!.push({ ...fileNode });
   }
@@ -265,7 +257,7 @@ function ensureDirectoryPath(
 ): void {
   if (directoryChildren.has(dirPath)) return;
 
-  const parentPath = posix.dirname(dirPath);
+  const parentPath = dirname(dirPath);
   ensureDirectoryPath(directoryChildren, parentPath);
 
   const directoryNode: MerkleNode = {
@@ -309,8 +301,8 @@ function buildDirectoryNode(
 }
 
 function normalizeCandidate(rootDir: string, candidate: string): string | null {
-  const relativePath = isAbsolute(candidate)
-    ? relative(rootDir, candidate)
+  const relativePath = isAbsolutePath(candidate)
+    ? relativePathFrom(rootDir, candidate)
     : candidate;
   const normalized = normalizeRelativePath(relativePath);
 
@@ -328,4 +320,42 @@ function normalizeCandidate(rootDir: string, candidate: string): string | null {
 
 function normalizeRelativePath(path: string): string {
   return path.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function normalizeSystemPath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+function joinPath(base: string, relativePath: string): string {
+  const normalizedBase = normalizeSystemPath(base);
+  const normalizedRelative = normalizeRelativePath(relativePath);
+  if (!normalizedRelative || normalizedRelative === ".") return normalizedBase;
+  return `${normalizedBase}/${normalizedRelative}`;
+}
+
+function isAbsolutePath(path: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("/");
+}
+
+function relativePathFrom(rootDir: string, absolutePath: string): string {
+  const root = normalizeSystemPath(rootDir).toLowerCase();
+  const target = normalizeSystemPath(absolutePath);
+  const lowerTarget = target.toLowerCase();
+  if (lowerTarget === root) return ".";
+  if (lowerTarget.startsWith(`${root}/`)) {
+    return target.slice(root.length + 1);
+  }
+  return target;
+}
+
+function basename(path: string): string {
+  const normalized = normalizeRelativePath(path);
+  const index = normalized.lastIndexOf("/");
+  return index === -1 ? normalized : normalized.slice(index + 1);
+}
+
+function dirname(path: string): string {
+  const normalized = normalizeRelativePath(path);
+  const index = normalized.lastIndexOf("/");
+  return index === -1 ? "." : normalized.slice(0, index);
 }

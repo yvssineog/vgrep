@@ -1,8 +1,3 @@
-import { appendFileSync, closeSync, existsSync, openSync } from "node:fs";
-import { watch as fsWatch, type FSWatcher } from "node:fs";
-import { readdir, rm, stat } from "node:fs/promises";
-import { isAbsolute, join, posix, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   MerkleTree,
   MerkleTreeUpdater,
@@ -36,7 +31,6 @@ interface WatchRuntime {
   pending: boolean;
   debounceTimer: Timer | null;
   pollTimer: Timer | null;
-  watcher: FSWatcher | null;
 }
 
 interface IgnoreRules {
@@ -51,7 +45,7 @@ export async function watchCommand(options: {
   logs?: boolean;
   daemon?: boolean;
 }): Promise<void> {
-  const projectRoot = resolve(options.path ?? process.cwd());
+  const projectRoot = resolveProjectRoot(options.path);
 
   if (options.logs) {
     await printLogs(projectRoot);
@@ -69,7 +63,7 @@ export async function watchCommand(options: {
   }
 
   if (options.daemon) {
-    setupLogSink(join(vgrepDir(projectRoot), FILES.watchLog));
+    setupLogSink(joinPath(vgrepDir(projectRoot), FILES.watchLog));
   }
 
   console.log(header("watch", projectRoot));
@@ -100,18 +94,19 @@ export async function watchCommand(options: {
     pending: false,
     debounceTimer: null,
     pollTimer: null,
-    watcher: null,
   };
 
   console.log(row("profiles", activeProfiles.join(", ")));
   if (options.daemon) {
-    await Bun.write(join(vgrepDir(projectRoot), FILES.watchPid), String(process.pid));
+    await Bun.write(
+      joinPath(vgrepDir(projectRoot), FILES.watchPid),
+      String(process.pid),
+    );
   }
 
   console.log(row("mode", options.daemon ? "daemon" : "foreground"));
   console.log(c.dim("watching for changes; press Ctrl+C to stop"));
 
-  runtime.watcher = startFsWatcher(runtime);
   runtime.pollTimer = setInterval(() => {
     void pollMetadata(runtime);
   }, POLL_MS);
@@ -126,30 +121,6 @@ async function readPersistedRoot(projectRoot: string): Promise<MerkleNode> {
   }
 
   return MerkleTree.deserialize(merkleJson);
-}
-
-function startFsWatcher(runtime: WatchRuntime): FSWatcher | null {
-  try {
-    const watcher = fsWatch(
-      runtime.projectRoot,
-      { recursive: true },
-      (_eventType, filename) => {
-        if (!filename) return;
-        const path = normalizeRelativePath(String(filename));
-        if (isRuntimePath(path)) return;
-        queueCandidate(runtime, path);
-      },
-    );
-    watcher.on("error", (err) => {
-      console.log(row("watcher", c.yellow(`fs.watch disabled: ${err.message}`)));
-      watcher.close();
-    });
-    return watcher;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.log(row("watcher", c.yellow(`fs.watch disabled: ${message}`)));
-    return null;
-  }
 }
 
 async function pollMetadata(runtime: WatchRuntime): Promise<void> {
@@ -241,11 +212,8 @@ async function waitForShutdown(
   const shutdown = (): void => {
     if (runtime.debounceTimer) clearTimeout(runtime.debounceTimer);
     if (runtime.pollTimer) clearInterval(runtime.pollTimer);
-    runtime.watcher?.close();
     if (cleanupPid) {
-      void rm(join(vgrepDir(runtime.projectRoot), FILES.watchPid), {
-        force: true,
-      });
+      void removeFile(joinPath(vgrepDir(runtime.projectRoot), FILES.watchPid));
     }
     console.log();
     console.log(row("watch", c.dim("stopped")));
@@ -260,44 +228,26 @@ async function waitForShutdown(
 
 async function scanMetadata(runtime: WatchRuntime): Promise<Map<string, string>> {
   const result = new Map<string, string>();
+  const glob = new Bun.Glob("**/*");
 
-  async function walk(relativeDir: string): Promise<void> {
-    const absoluteDir =
-      relativeDir === "."
-        ? runtime.projectRoot
-        : join(runtime.projectRoot, ...relativeDir.split("/"));
-    const entries = await readdir(absoluteDir, { withFileTypes: true }).catch(
-      () => [],
-    );
-
-    for (const entry of entries) {
-      const relativePath = normalizeRelativePath(
-        relativeDir === "." ? entry.name : `${relativeDir}/${entry.name}`,
-      );
-
-      if (isRuntimePath(relativePath) || isIgnored(relativePath, runtime.ignoreRules)) {
-        continue;
-      }
-
-      if (entry.isDirectory()) {
-        await walk(relativePath);
-        continue;
-      }
-
-      if (!entry.isFile() || !runtime.isIndexableFile(relativePath)) {
-        continue;
-      }
-
-      const absolutePath = join(runtime.projectRoot, ...relativePath.split("/"));
-      const stats = await stat(absolutePath).catch(() => null);
-      if (!stats?.isFile()) continue;
-
-      result.set(relativePath, `${stats.size}:${stats.mtimeMs}`);
+  for await (const path of glob.scan({
+    cwd: runtime.projectRoot,
+    dot: true,
+    onlyFiles: true,
+  })) {
+    const relativePath = normalizeRelativePath(path);
+    if (
+      isRuntimePath(relativePath) ||
+      isIgnored(relativePath, runtime.ignoreRules) ||
+      !runtime.isIndexableFile(relativePath)
+    ) {
+      continue;
     }
+
+    const file = Bun.file(joinPath(runtime.projectRoot, relativePath));
+    if (!(await file.exists())) continue;
+    result.set(relativePath, `${file.size}:${file.lastModified}`);
   }
-
-  await walk(".");
-
   return result;
 }
 
@@ -327,9 +277,44 @@ function normalizeRelativePath(path: string): string {
   return path.replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
+function normalizeSystemPath(path: string): string {
+  return normalizeRelativePath(path).replace(/\/+$/, "");
+}
+
+function resolveProjectRoot(path?: string): string {
+  if (!path) return normalizeSystemPath(process.cwd());
+  const normalized = normalizeSystemPath(path);
+  if (isAbsolutePath(normalized)) return normalized;
+  return joinPath(process.cwd(), normalized);
+}
+
+function joinPath(base: string, relativePath: string): string {
+  const normalizedBase = normalizeSystemPath(base);
+  const normalizedRelative = normalizeRelativePath(relativePath);
+  if (!normalizedRelative || normalizedRelative === ".") return normalizedBase;
+  return `${normalizedBase}/${normalizedRelative}`;
+}
+
 function normalizeCandidate(projectRoot: string, path: string): string {
-  const relativePath = isAbsolute(path) ? relative(projectRoot, path) : path;
+  const relativePath = isAbsolutePath(path)
+    ? relativePathFrom(projectRoot, path)
+    : path;
   return normalizeRelativePath(relativePath);
+}
+
+function isAbsolutePath(path: string): boolean {
+  return /^[A-Za-z]:\//.test(normalizeRelativePath(path)) || path.startsWith("/");
+}
+
+function relativePathFrom(rootDir: string, absolutePath: string): string {
+  const root = normalizeSystemPath(rootDir).toLowerCase();
+  const target = normalizeSystemPath(absolutePath);
+  const lowerTarget = target.toLowerCase();
+  if (lowerTarget === root) return ".";
+  if (lowerTarget.startsWith(`${root}/`)) {
+    return target.slice(root.length + 1);
+  }
+  return target;
 }
 
 function isRuntimePath(path: string): boolean {
@@ -353,31 +338,29 @@ async function startDaemon(projectRoot: string): Promise<void> {
     return;
   }
   if (existingPid) {
-    await rm(join(vgrepDir(projectRoot), FILES.watchPid), { force: true });
+    await removeFile(joinPath(vgrepDir(projectRoot), FILES.watchPid));
   }
 
-  const logPath = join(vgrepDir(projectRoot), FILES.watchLog);
+  const logPath = joinPath(vgrepDir(projectRoot), FILES.watchLog);
   await Bun.write(logPath, "");
 
   const cmd = buildDaemonCommand(projectRoot);
-  const logFd = openSync(logPath, "a");
   const proc = Bun.spawn(cmd, {
     cwd: projectRoot,
     stdin: "ignore",
-    stdout: logFd,
-    stderr: logFd,
+    stdout: "ignore",
+    stderr: "ignore",
     windowsHide: true,
   });
   proc.unref();
 
-  await Bun.write(join(vgrepDir(projectRoot), FILES.watchPid), String(proc.pid));
+  await Bun.write(joinPath(vgrepDir(projectRoot), FILES.watchPid), String(proc.pid));
   const earlyExit = await Promise.race([
     proc.exited.then((code) => code),
     sleep(750).then(() => null),
   ]);
-  closeSync(logFd);
   if (earlyExit !== null) {
-    await rm(join(vgrepDir(projectRoot), FILES.watchPid), { force: true });
+    await removeFile(joinPath(vgrepDir(projectRoot), FILES.watchPid));
     console.log(row("watch", c.red(`failed to start (exit ${earlyExit})`)));
     console.log(row("logs", c.dim(logPath)));
     process.exit(1);
@@ -388,7 +371,7 @@ async function startDaemon(projectRoot: string): Promise<void> {
 }
 
 async function stopDaemon(projectRoot: string): Promise<void> {
-  const pidPath = join(vgrepDir(projectRoot), FILES.watchPid);
+  const pidPath = joinPath(vgrepDir(projectRoot), FILES.watchPid);
   const pid = await readPid(projectRoot);
   if (!pid) {
     console.log(row("watch", c.dim("not running")));
@@ -396,18 +379,18 @@ async function stopDaemon(projectRoot: string): Promise<void> {
   }
 
   if (!isProcessAlive(pid)) {
-    await rm(pidPath, { force: true });
+    await removeFile(pidPath);
     console.log(row("watch", c.dim("stale pid removed")));
     return;
   }
 
   process.kill(pid, "SIGTERM");
-  await rm(pidPath, { force: true });
+  await removeFile(pidPath);
   console.log(row("watch", c.green(`stopped pid ${pid}`)));
 }
 
 async function printLogs(projectRoot: string): Promise<void> {
-  const logPath = join(vgrepDir(projectRoot), FILES.watchLog);
+  const logPath = joinPath(vgrepDir(projectRoot), FILES.watchLog);
   const file = Bun.file(logPath);
   if (!(await file.exists())) {
     console.log(row("logs", c.dim("no watch log found")));
@@ -419,7 +402,7 @@ async function printLogs(projectRoot: string): Promise<void> {
 }
 
 async function readPid(projectRoot: string): Promise<number | null> {
-  const file = Bun.file(join(vgrepDir(projectRoot), FILES.watchPid));
+  const file = Bun.file(joinPath(vgrepDir(projectRoot), FILES.watchPid));
   if (!(await file.exists())) return null;
 
   const pid = Number.parseInt((await file.text()).trim(), 10);
@@ -436,10 +419,10 @@ function isProcessAlive(pid: number): boolean {
 }
 
 function buildDaemonCommand(projectRoot: string): string[] {
-  const cliSourcePath = fileURLToPath(new URL("../cli.ts", import.meta.url));
+  const cliSourcePath = joinPath(import.meta.dir, "../cli.ts");
   const bunExecutable = Bun.argv[0] ?? "bun";
 
-  if (existsSync(cliSourcePath)) {
+  if (import.meta.path.endsWith(".ts")) {
     return [
       bunExecutable,
       cliSourcePath,
@@ -454,9 +437,14 @@ function buildDaemonCommand(projectRoot: string): string[] {
 }
 
 function setupLogSink(logPath: string): void {
+  let writeChain = Promise.resolve();
   const write = (level: "log" | "error", values: unknown[]): void => {
     const line = values.map(formatLogValue).join(" ");
-    appendFileSync(logPath, `${new Date().toISOString()} ${line}\n`);
+    writeChain = writeChain.then(async () => {
+      const file = Bun.file(logPath);
+      const previous = (await file.exists()) ? await file.text() : "";
+      await Bun.write(logPath, `${previous}${new Date().toISOString()} ${line}\n`);
+    });
     if (level === "error") {
       process.stderr.write(`${line}\n`);
     }
@@ -477,7 +465,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function readIgnoreRules(projectRoot: string): Promise<IgnoreRules> {
-  const ignoreFile = Bun.file(join(projectRoot, ".vgrepignore"));
+  const ignoreFile = Bun.file(joinPath(projectRoot, ".vgrepignore"));
   if (!(await ignoreFile.exists())) {
     return { exactNames: new Set(), globPatterns: [] };
   }
@@ -508,7 +496,7 @@ function parseIgnorePatterns(patterns: Iterable<string>): IgnoreRules {
 
 function isIgnored(relativePath: string, ignoreRules: IgnoreRules): boolean {
   const normalizedPath = normalizeRelativePath(relativePath);
-  const name = posix.basename(normalizedPath);
+  const name = basename(normalizedPath);
   const segments = normalizedPath.split("/");
 
   if (
@@ -524,4 +512,16 @@ function isIgnored(relativePath: string, ignoreRules: IgnoreRules): boolean {
   }
 
   return false;
+}
+
+function basename(path: string): string {
+  const normalized = normalizeRelativePath(path);
+  const index = normalized.lastIndexOf("/");
+  return index === -1 ? normalized : normalized.slice(index + 1);
+}
+
+async function removeFile(path: string): Promise<void> {
+  const file = Bun.file(path);
+  if (!(await file.exists())) return;
+  await file.delete();
 }
