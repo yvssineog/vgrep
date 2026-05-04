@@ -1,0 +1,10 @@
+{
+  "name": "koa",
+  "repo": "https://github.com/koajs/koa.git",
+  "revision": "2.15.3",
+  "query": "Where does Koa dispatch incoming requests through its middleware stack (the onion pattern)? Name the file and the function performing the dispatch.",
+  "expectations": {
+    "pathSubstring": "lib",
+    "answerMustInclude": ["dispatch"]
+  }
+}

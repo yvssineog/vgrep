@@ -31,6 +31,7 @@ export async function initCommand(options: {
   force?: boolean;
   include?: string;
   only?: string;
+  installSkill?: boolean;
 }): Promise<void> {
   const projectRoot = resolve(options.path ?? process.cwd());
 
@@ -145,16 +146,24 @@ export async function initCommand(options: {
   status("chunking...");
   const chunkStart = performance.now();
   let chunkedFiles = 0;
+  const failedFiles: { path: string; reason: string }[] = [];
   const chunkGroups = await mapWithConcurrency(
     filesToIndex,
     8,
     async (filePath) => {
       const absolutePath = join(projectRoot, ...filePath.split("/"));
-      const content = await Bun.file(absolutePath).text();
-      const chunks = await chunkFile(filePath, content);
-      chunkedFiles += 1;
-      status(`chunking ${chunkedFiles}/${filesToIndex.length} ${filePath}`);
-      return chunks;
+      try {
+        const content = await Bun.file(absolutePath).text();
+        const chunks = await chunkFile(filePath, content);
+        chunkedFiles += 1;
+        status(`chunking ${chunkedFiles}/${filesToIndex.length} ${filePath}`);
+        return chunks;
+      } catch (err) {
+        chunkedFiles += 1;
+        const reason = err instanceof Error ? err.message : String(err);
+        failedFiles.push({ path: filePath, reason });
+        return [];
+      }
     },
   );
   const chunkMs = performance.now() - chunkStart;
@@ -185,8 +194,57 @@ export async function initCommand(options: {
   console.log(row("chunk", c.dim(formatDuration(chunkMs))));
   console.log(row("embed", c.dim(formatDuration(embedMs))));
   console.log(row("upsert", c.dim(formatDuration(upsertMs))));
+  if (failedFiles.length > 0) {
+    console.log(
+      row(
+        "skipped",
+        c.yellow(`${failedFiles.length} file(s) failed to chunk`),
+      ),
+    );
+    for (const { path, reason } of failedFiles.slice(0, 3)) {
+      console.log(`  ${c.dim(path)} — ${c.dim(reason.slice(0, 80))}`);
+    }
+    if (failedFiles.length > 3) {
+      console.log(`  ${c.dim(`… ${failedFiles.length - 3} more`)}`);
+    }
+  }
 
   await writeMerkleJson(projectRoot, tree.serialize());
+
+  if (options.installSkill !== false) {
+    await installVgrepSkill(projectRoot);
+  }
+}
+
+const SKILL_SOURCE = "github:yvssineog/vgrep";
+
+async function installVgrepSkill(projectRoot: string): Promise<void> {
+  console.log();
+  console.log(c.dim("→ running: npx skills add (interactive)"));
+  const proc = Bun.spawn(
+    ["npx", "--yes", "skills", "add", SKILL_SOURCE, "--skill", "vgrep"],
+    {
+      cwd: projectRoot,
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    },
+  );
+  const exitCode = await proc.exited;
+  console.log();
+
+  if (exitCode === 0) {
+    console.log(row("skill", c.green("installed")));
+  } else {
+    console.log(
+      row(
+        "skill",
+        c.yellow(
+          `skipped (exit ${exitCode}) — re-run with: npx skills add ${SKILL_SOURCE} --skill vgrep`,
+        ),
+      ),
+    );
+  }
 }
 
 async function mapWithConcurrency<T, R>(

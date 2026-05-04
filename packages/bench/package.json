@@ -1,0 +1,15 @@
+{
+  "name": "@vgrep/bench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bench": "bun run src/run.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ai": "^5.0.0",
+    "@ai-sdk/openai": "^2.0.0",
+    "zod": "^3.23.0"
+  }
+}

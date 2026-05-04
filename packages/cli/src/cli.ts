@@ -25,7 +25,8 @@ const COMMAND_HELP = {
 -p, --path <dir>       project root (defaults to cwd)
 -f, --force            continue indexing after scaffolding .vgrepignore
     --include <names>  comma-separated profiles to add to defaultProfiles
-    --only <names>     comma-separated profiles to use instead of defaultProfiles`,
+    --only <names>     comma-separated profiles to use instead of defaultProfiles
+    --no-skill         skip installing the vgrep agent skill (default: install)`,
   search: `usage: vgrep search [options] <query...>
 
 -p, --path <dir>  project root (defaults to cwd)
@@ -68,10 +69,17 @@ async function main(): Promise<void> {
           force: { type: "boolean", short: "f" },
           include: { type: "string" },
           only: { type: "string" },
+          "no-skill": { type: "boolean" },
         },
         strict: true,
       });
-      await initCommand(values);
+      await initCommand({
+        path: values.path,
+        force: values.force,
+        include: values.include,
+        only: values.only,
+        installSkill: !values["no-skill"],
+      });
       return;
     }
     case "status": {
