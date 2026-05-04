@@ -15,6 +15,7 @@ export type {
 
 // Merkle Tree
 export { MerkleTree } from "./merkle/tree";
+export { MerkleTreeUpdater, type MerkleUpdateResult } from "./merkle/updater";
 export { diffTrees } from "./merkle/diff";
 
 // Simhash
