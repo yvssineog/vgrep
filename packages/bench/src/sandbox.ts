@@ -56,7 +56,7 @@ export class LocalSandbox {
   }
 
   async vgrepInit(): Promise<RunResult> {
-    return this.run("vgrep", ["init", "--force", "--no-skill"], {
+    return this.run("vgrep", ["init", "--force"], {
       timeoutMs: 600_000,
     });
   }

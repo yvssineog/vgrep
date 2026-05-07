@@ -8,11 +8,10 @@ import {
 } from "@vgrep/core";
 import {
   c,
-  clearStatus,
+  Chronometer,
   formatBytes,
   formatDuration,
   row,
-  status,
 } from "../style";
 import { writeMerkleJson } from "../config";
 
@@ -36,51 +35,51 @@ export async function runIndex(opts: {
   projectRoot: string;
   previous: MerkleNode | null;
   verbose?: boolean;
+  chrono?: Chronometer;
 }): Promise<IndexRunResult> {
   const { sidecar, projectRoot, previous, verbose = true } = opts;
+  const chrono = opts.chrono ?? new Chronometer();
   const t0 = performance.now();
 
-  status("walking + diffing...");
+  chrono.setStage("walking + diffing...");
   const update = await sidecar.updateTree({ previous });
   const treeMs = performance.now() - t0;
 
   const fileCount = countFiles(update.tree);
   const totalBytes = totalSize(update.tree);
 
-  clearStatus();
   if (verbose) {
-    console.log(
+    chrono.log(
       row(
         "tree",
         `${fileCount} files  ${formatBytes(totalBytes)}  ${formatDuration(treeMs)}`,
       ),
     );
-    console.log(row("hash", c.dim(update.tree.hash.slice(0, 16))));
-    logChanges(previous, update.changes);
+    chrono.log(row("hash", c.dim(update.tree.hash.slice(0, 16))));
+    logChanges(chrono, previous, update.changes);
   }
 
   const t1 = performance.now();
   const stats = await sidecar.applyDiff(
     { changes: update.changes },
     (frame: ProgressFrame) => {
-      status(`${frame.stage} ${frame.done}/${frame.total}`);
+      chrono.setStage(`${frame.stage} ${frame.done}/${frame.total}`);
     },
   );
   const indexMs = performance.now() - t1;
-  clearStatus();
 
   if (verbose) {
-    console.log(
+    chrono.log(
       row(
         "indexed",
         `${c.bold(stats.indexedChunks)} chunks  ${formatDuration(indexMs)}`,
       ),
     );
     if (stats.deletedFiles > 0) {
-      console.log(row("delete", c.dim(`${stats.deletedFiles} file(s)`)));
+      chrono.log(row("delete", c.dim(`${stats.deletedFiles} file(s)`)));
     }
     if (stats.failedFiles > 0) {
-      console.log(
+      chrono.log(
         row("skipped", c.yellow(`${stats.failedFiles} file(s) failed`)),
       );
     }
@@ -101,15 +100,16 @@ function totalSize(node: MerkleNode): number {
 }
 
 function logChanges(
+  chrono: Chronometer,
   previous: MerkleNode | null,
   changes: ChangedFile[],
 ): void {
   if (!previous) {
-    console.log(row("changes", `first index, ${changes.length} files`));
+    chrono.log(row("changes", `first index, ${changes.length} files`));
     return;
   }
   if (changes.length === 0) {
-    console.log(row("changes", c.green("none")));
+    chrono.log(row("changes", c.green("none")));
     return;
   }
   const counts = changes.reduce(
@@ -126,10 +126,10 @@ function logChanges(
   ]
     .filter(Boolean)
     .join(c.dim(", "));
-  console.log(row("changes", summary));
+  chrono.log(row("changes", summary));
 
   const maxShow = 10;
-  console.log();
+  chrono.log("");
   for (const change of changes.slice(0, maxShow)) {
     const marker =
       change.type === "added"
@@ -137,10 +137,10 @@ function logChanges(
         : change.type === "deleted"
           ? c.red("D")
           : c.yellow("M");
-    console.log(`${marker} ${c.dim(change.path)}`);
+    chrono.log(`${marker} ${c.dim(change.path)}`);
   }
   if (changes.length > maxShow) {
-    console.log(c.dim(`... ${changes.length - maxShow} more`));
+    chrono.log(c.dim(`... ${changes.length - maxShow} more`));
   }
 }
 

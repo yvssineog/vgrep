@@ -1,20 +1,19 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import {
   readIgnoreText,
   resolveProfileFilters,
   SidecarClient,
-  type MerkleNode,
   type VgrepConfig,
 } from "@vgrep/core";
-import { c, header, row } from "../style";
+import { c, Chronometer, formatDuration, header, row } from "../style";
 import {
   FILES,
   ensureConfig,
+  ensureVgrepDir,
   ensureVgrepIgnore,
-  readMerkleJson,
   vgrepDir,
 } from "../config";
 import { runIndex } from "../indexing/index-project";
@@ -42,65 +41,99 @@ export async function initCommand(options: {
 }): Promise<void> {
   const projectRoot = resolve(options.path ?? process.cwd());
 
-  console.log(header("init", projectRoot));
+  const chrono = new Chronometer();
+  chrono.log(header("init", projectRoot));
+  chrono.start();
 
-  const firstEverRun = !existsSync(FIRST_RUN_MARKER);
-  await mkdir(MODEL_DIR, { recursive: true });
-  if (firstEverRun) {
-    console.log(row("model", `downloading to ${c.dim(MODEL_DIR)}`));
-  }
-
-  const config = await ensureConfig(projectRoot);
-  const activeProfiles = resolveProfiles(config, options);
-  console.log(row("profiles", activeProfiles.join(", ")));
-
-  const createdIgnore = await ensureVgrepIgnore(projectRoot);
-  if (createdIgnore) {
-    console.log(row("scaffold", c.green(".vgrepignore created")));
-    if (!options.force) {
-      console.log();
-      console.log(
-        `${c.dim("review .vgrepignore + .vgrep/config.json, then run")} ${c.bold("vgrep init")}`,
-      );
-      console.log(
-        `${c.dim("or skip with")} ${c.bold("vgrep init --force")}`,
-      );
-      return;
-    }
-  }
-
-  const previous = await loadPreviousTree(projectRoot);
-  const ignoreText = await readIgnoreText(projectRoot);
-  const { extensions, filenames } = resolveProfileFilters(
-    activeProfiles,
-    config.fileProfiles ?? {},
-  );
-
-  const sidecar = new SidecarClient({
-    projectRoot,
-    env: sidecarEnv(firstEverRun),
-  });
-  await sidecar.start();
   try {
-    await sidecar.open({
+    const firstEverRun = !existsSync(FIRST_RUN_MARKER);
+    await mkdir(MODEL_DIR, { recursive: true });
+    if (firstEverRun) {
+      chrono.log(row("model", `downloading to ${c.dim(MODEL_DIR)}`));
+    }
+
+    const config = await ensureConfig(projectRoot);
+    const activeProfiles = resolveProfiles(config, options);
+    chrono.log(row("profiles", activeProfiles.join(", ")));
+
+    const createdIgnore = await ensureVgrepIgnore(projectRoot);
+    if (createdIgnore) {
+      chrono.log(row("scaffold", c.green(".vgrepignore created")));
+      if (!options.force) {
+        chrono.stop();
+        console.log();
+        console.log(
+          `${c.dim("review .vgrepignore + .vgrep/config.json, then run")} ${c.bold("vgrep init")}`,
+        );
+        console.log(
+          `${c.dim("or skip with")} ${c.bold("vgrep init --force")}`,
+        );
+        return;
+      }
+    }
+
+    // `vgrep init` always re-indexes from scratch — wipe the prior
+    // merkle snapshot, the SQLite vector store, and the embedding cache
+    // so the run is reproducible and never sees stale state.
+    //
+    // Wiping while the watch daemon holds the SQLite file open produces
+    // a "disk I/O error" on the next open. Refuse with a clear hint
+    // instead of letting init crash partway through.
+    const runningPid = await detectRunningDaemon(projectRoot);
+    if (runningPid !== null) {
+      throw new Error(
+        `watch daemon is running (pid ${runningPid}). Stop it first: vgrep watch --stop`,
+      );
+    }
+    chrono.setStage("clearing cache...");
+    await wipeIndex(projectRoot);
+    await ensureVgrepDir(projectRoot);
+
+    const ignoreText = await readIgnoreText(projectRoot);
+    const { extensions, filenames } = resolveProfileFilters(
+      activeProfiles,
+      config.fileProfiles ?? {},
+    );
+
+    const sidecar = new SidecarClient({
       projectRoot,
-      dbPath: join(vgrepDir(projectRoot), FILES.index),
-      cacheDir: join(vgrepDir(projectRoot), FILES.cache),
-      extensions,
-      filenames,
-      ignoreText,
+      env: sidecarEnv(firstEverRun),
     });
-    await runIndex({ sidecar, projectRoot, previous });
-  } finally {
-    await sidecar.close();
-  }
+    chrono.setStage("starting sidecar...");
+    const sidecarT0 = performance.now();
+    await sidecar.start();
+    try {
+      chrono.setStage(
+        firstEverRun ? "loading model (first run)..." : "loading model...",
+      );
+      await sidecar.open({
+        projectRoot,
+        dbPath: join(vgrepDir(projectRoot), FILES.index),
+        cacheDir: join(vgrepDir(projectRoot), FILES.cache),
+        extensions,
+        filenames,
+        ignoreText,
+      });
+      const sidecarMs = performance.now() - sidecarT0;
+      chrono.log(row("sidecar", `ready  ${formatDuration(sidecarMs)}`));
+      await runIndex({ sidecar, projectRoot, previous: null, chrono });
+    } finally {
+      await sidecar.close();
+    }
 
-  if (firstEverRun) {
-    await writeFile(FIRST_RUN_MARKER, new Date().toISOString());
-  }
+    if (firstEverRun) {
+      await writeFile(FIRST_RUN_MARKER, new Date().toISOString());
+    }
 
-  if (options.installSkill === true) {
-    await installVgrepSkill(projectRoot);
+    if (options.installSkill === true) {
+      await installVgrepSkill(chrono, projectRoot);
+    }
+
+    const totalMs = chrono.stop();
+    console.log(row("total", c.bold(formatDuration(totalMs))));
+  } catch (err) {
+    chrono.stop();
+    throw err;
   }
 }
 
@@ -124,15 +157,35 @@ function sidecarEnv(firstRun: boolean): Record<string, string> {
   return env;
 }
 
-async function loadPreviousTree(projectRoot: string): Promise<MerkleNode | null> {
-  const json = await readMerkleJson(projectRoot);
-  if (!json) return null;
-  return JSON.parse(json) as MerkleNode;
+async function detectRunningDaemon(projectRoot: string): Promise<number | null> {
+  const pidPath = join(vgrepDir(projectRoot), FILES.daemonPid);
+  const file = Bun.file(pidPath);
+  if (!(await file.exists())) return null;
+  const pid = Number.parseInt((await file.text()).trim(), 10);
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  try {
+    process.kill(pid, 0);
+    return pid;
+  } catch {
+    return null;
+  }
+}
+
+async function wipeIndex(projectRoot: string): Promise<void> {
+  const dir = vgrepDir(projectRoot);
+  await Promise.all([
+    rm(join(dir, FILES.index), { force: true }),
+    rm(join(dir, FILES.merkle), { force: true }),
+    rm(join(dir, FILES.cache), { recursive: true, force: true }),
+  ]);
 }
 
 const SKILL_SOURCE = "github:yvssineog/vgrep";
 
-async function installVgrepSkill(projectRoot: string): Promise<void> {
+async function installVgrepSkill(
+  chrono: Chronometer,
+  projectRoot: string,
+): Promise<void> {
   // Non-interactive install: we pin every prompt the installer asks
   // (target agent, scope, method) so it never blocks the terminal and
   // never paints its 80-column box-drawing UI over our log lines.
@@ -152,14 +205,15 @@ async function installVgrepSkill(projectRoot: string): Promise<void> {
       stderr: "pipe",
     },
   );
+  chrono.setStage("installing skill...");
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
 
   if (exitCode === 0) {
-    console.log(row("skill", c.green("installed")));
+    chrono.log(row("skill", c.green("installed")));
   } else {
     const hint = stderr.trim().split("\n").pop() ?? "";
-    console.log(
+    chrono.log(
       row("skill", c.yellow(`skipped (exit ${exitCode}) ${c.dim(hint)}`)),
     );
   }
