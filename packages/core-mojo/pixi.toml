@@ -1,0 +1,33 @@
+[workspace]
+name = "vgrep-core"
+description = "Mojo sidecar for vgrep — file walking, merkle hashing, semantic chunking, embedding, vector kNN"
+authors = ["vgrep"]
+# Stable Mojo / MAX channel (beta v1 line). Switch to
+# https://conda.modular.com/max-nightly/ for nightly builds.
+channels = ["https://conda.modular.com/max/", "conda-forge"]
+# Modular only ships osx-arm64 (Apple Silicon) + linux-64 + linux-aarch64;
+# Intel Mac (osx-64) is unsupported.
+platforms = ["osx-arm64", "linux-64", "linux-aarch64"]
+version = "0.1.0"
+
+[tasks]
+# Long-lived sidecar entrypoint; `bun` spawns one of these per project.
+run     = "mojo run src/main.mojo"
+build   = "mojo build src/main.mojo -o dist/vgrep-core"
+test    = "mojo run tests/run.mojo"
+fmt     = "mojo format src/"
+
+[dependencies]
+# `mojo` is the canonical package name on the modular channel. It pulls
+# in MAX (the runtime that hosts ONNX/torch tensors used by the embedder).
+mojo = "*"
+python = ">=3.11,<3.13"
+
+[pypi-dependencies]
+# Tree-sitter parsing: per-language grammars + the runtime.
+"tree-sitter" = ">=0.23"
+"tree-sitter-language-pack" = ">=0.7"
+# Embeddings: sentence-transformers wraps HF + provides cosine-friendly outputs.
+"sentence-transformers" = ">=3.0"
+# Used by sentence-transformers for ONNX/torch backends; let pip resolve.
+"numpy" = ">=1.26"
