@@ -9,7 +9,8 @@
     "test": "bun test --recursive",
     "lint": "tsc --noEmit",
     "vgrep": "bun packages/cli/src/cli.ts",
-    "bench": "bun packages/bench/src/run.ts"
+    "bench": "bun packages/bench/src/run.ts",
+    "install:local": "bash scripts/install.sh"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

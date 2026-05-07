@@ -26,10 +26,35 @@ vgrep search "authenticate user"     # ✅ finds all of the above
 ### Key Features
 
 - **Local-First** — Runs 100% on your machine by default. Your code never leaves your computer.
-- **Blazing Fast** — Built on [Bun](https://bun.sh), compiled to a single standalone binary. Indexing uses SHA-256 Merkle trees for incremental updates, only re-indexes what changed.
-- **Semantic Search** — Powered by `all-MiniLM-L6-v2` embeddings running locally via `@xenova/transformers`. No API keys needed.
-- **Smart Diffing** — Merkle tree + simhash fingerprinting means re-indexing is near-instant for small changes.
+- **Bun + Mojo** — A thin [Bun](https://bun.sh) CLI/server that delegates the heavy local-processing pipeline to a long-lived [Mojo](https://www.modular.com/mojo) sidecar. The Bun half handles HTTP, AI SDK provider routing, and orchestration; the Mojo half handles file walking, SHA-256 hashing, semantic chunking, embedding inference, and SIMD cosine kNN.
+- **Semantic Search** — Default embedding model is `all-MiniLM-L6-v2`. The vector index is one contiguous float32 buffer; search is a fused `parallelize[vectorize[...]]` over every chunk in the corpus.
+- **Smart Diffing** — Merkle tree of SHA-256 hashes lets re-indexing be O(changed files), not O(repo).
 - **Optional Cloud Sync** — Share indexes across your team via a serverless AWS backend (SST v3). Zero-ops deployment.
+
+## Building from source
+
+vgrep ships as a single Bun-compiled binary that embeds the Mojo
+sidecar. Building it locally requires both toolchains:
+
+```bash
+# Install pixi (manages the Modular/Mojo toolchain)
+curl -fsSL https://pixi.sh/install.sh | bash
+
+# Build the Mojo sidecar
+cd packages/core-mojo
+pixi install
+pixi run build           # produces dist/vgrep-core
+
+# Build the Bun front-end
+cd ../cli
+bun install
+bun run build            # produces ./vgrep
+```
+
+For development you can skip the build step and run straight from
+source — `bun packages/cli/src/cli.ts` will look for the sidecar
+binary, fall back to `pixi run mojo run …` against the source tree,
+and behave identically.
 
 ## Quick Start
 
@@ -70,42 +95,58 @@ vgrep search "error handling for API responses"
 
 ### Architecture
 
-vgrep operates in two modes:
+vgrep is split across two processes that talk over `stdio`:
 
-| | **Local Mode** (Default) | **Cloud Mode** |
-|---|---|---|
-| **Index storage** | `.vgrep/` directory in your project | AWS DynamoDB + Pinecone |
-| **Embeddings** | LanceDB (local, zero-config) | Pinecone (managed, free tier) |
-| **ML Model** | `@xenova/transformers` in Bun | Lambda-hosted |
-| **Privacy** | 100% offline | Encrypted, team-scoped |
-| **Sharing** | Single developer | Entire team |
+```
+┌─────────────────────────┐  NDJSON   ┌─────────────────────────────┐
+│  vgrep (Bun)            │◀─────────▶│  vgrep-core (Mojo sidecar)  │
+│                         │           │                             │
+│  • CLI parsing          │           │  • file walk + .vgrepignore │
+│  • Unix-socket server   │           │  • SHA-256 + Merkle tree    │
+│  • daemon PID/log files │           │  • Tree-sitter chunking     │
+│  • AI SDK routing       │           │  • embedding inference      │
+│    (cloud mode)         │           │  • SQLite + vector cache    │
+│                         │           │  • SIMD cosine kNN          │
+└─────────────────────────┘           └─────────────────────────────┘
+```
+
+The Bun parent owns the CLI surface, the Unix-socket HTTP server (so
+`vgrep search` from another shell still feels instant), and the AI SDK
+provider plumbing for cloud mode. The Mojo sidecar owns every CPU- or
+I/O-bound stage; it loads the embedding model exactly once at daemon
+startup and keeps the entire vector corpus mmap-resident in a single
+contiguous `float32` buffer.
 
 ### The Pipeline
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌────────────────┐     ┌──────────────┐
 │  File System │ ──→ │  Merkle Tree │ ──→ │  Code Chunker  │ ──→ │  Embeddings  │
-│    Walker    │     │  (SHA-256)   │     │  (AST-aware)   │     │  (MiniLM)    │
+│    Walker    │     │  (SHA-256)   │     │  (Tree-sitter) │     │  (MiniLM)    │
 └──────────────┘     └──────────────┘     └────────────────┘     └──────────────┘
-                             │                                           │
-                    ┌────────┴────────┐                         ┌────────┴────────┐
-                    │  Diff Engine    │                         │  Vector Store   │
-                    │  (incremental)  │                         │  (LanceDB)      │
-                    └─────────────────┘                         └─────────────────┘
+                                                                         │
+                                                ┌────────────────────────┴────┐
+                                                │  SQLite + flat float32 mmap │
+                                                │  • durable rows in SQLite   │
+                                                │  • one matrix in memory     │
+                                                │  • SIMD parallelize[kNN]    │
+                                                └─────────────────────────────┘
 ```
 
 1. **Walk** — Recursively scans your project, respecting `.vgrepignore`.
-2. **Hash** — Builds a Merkle tree (SHA-256) for instant diff detection.
-3. **Chunk** — Splits files into semantic chunks (function/class boundaries).
-4. **Embed** — Computes 384-dimensional vectors using MiniLM-L6-v2 (runs locally in Bun).
-5. **Store** — Upserts vectors into LanceDB (local) or Pinecone (cloud).
-6. **Search** — Converts your query to a vector and finds nearest neighbors.
+2. **Hash** — Builds a Merkle tree (SHA-256, parallelized across CPU threads) for instant diff detection.
+3. **Chunk** — Splits files into semantic chunks at function/class boundaries via Tree-sitter (8 files in parallel).
+4. **Embed** — Computes 384-dim vectors with MiniLM-L6-v2; cache hits skip the model entirely.
+5. **Store** — Upserts into SQLite (durable) and into the contiguous in-memory matrix (search-time hot path).
+6. **Search** — Embeds the query and runs one fused `parallelize[vectorize[...]]` cosine pass over the matrix.
 
 ### Incremental Re-indexing
 
-In `watch` mode, filesystem events and lightweight metadata polling identify candidate paths first. The Merkle tree is then updated incrementally by re-hashing only those candidates and recalculating parent directory hashes.
-
-On subsequent `init` runs, vgrep compares the previous Merkle snapshot with the current one and only re-indexes changed files.
+The Bun-side poller does a lightweight `size:mtime` scan every two
+seconds, debounces bursts, and ships the candidate list to the
+sidecar. The sidecar re-walks, hashes only changed files, splices them
+into the previous Merkle tree, diffs, and re-embeds — typically
+sub-second for a handful of file edits.
 
 ---
 
@@ -116,10 +157,10 @@ On subsequent `init` runs, vgrep compares the previous Merkle snapshot with the 
 | `vgrep init` | Build the Merkle tree and index the codebase  |
 | `vgrep status` | Show index stats, root hash, simhash, and mode  |
 | `vgrep search "<query>"` | Search the local semantic index  |
-| `vgrep watch` | Watch the repo in the foreground and keep the local index updated |
-| `vgrep watch --start` | Start the watchdog in the background |
-| `vgrep watch --logs` | Show the latest watchdog logs from `.vgrep/watch.log` |
-| `vgrep watch --stop` | Stop the background watchdog |
+| `vgrep watch` | Run the daemon in the foreground: keep the index updated and serve searches |
+| `vgrep watch --start` | Start the daemon in the background |
+| `vgrep watch --logs` | Show the latest daemon logs from `.vgrep/daemon.log` |
+| `vgrep watch --stop` | Stop the background daemon |
 
 ### Options
 
