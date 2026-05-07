@@ -17,7 +17,7 @@ commands
 init            build or update the local index
 search <query>  semantic search over the index
 status          show index stats
-watch           keep the index updated while files change
+watch           run the daemon: keep the index updated and serve searches
 
 run "vgrep <command> --help" for command options`;
 
@@ -28,7 +28,7 @@ const COMMAND_HELP = {
 -f, --force            continue indexing after scaffolding .vgrepignore
     --include <names>  comma-separated profiles to add to defaultProfiles
     --only <names>     comma-separated profiles to use instead of defaultProfiles
-    --no-skill         skip installing the vgrep agent skill (default: install)`,
+    --install-skill    install the vgrep agent skill (default: skip)`,
   search: `usage: vgrep search [options] <query...>
 
 -p, --path <dir>  project root (defaults to cwd)
@@ -39,9 +39,9 @@ const COMMAND_HELP = {
   watch: `usage: vgrep watch [options]
 
 -p, --path <dir>  project root (defaults to cwd)
-    --start       start the watchdog in the background
-    --logs        show the last watchdog logs
-    --stop        stop the background watchdog`,
+    --start       start the daemon in the background
+    --logs        show the last daemon logs
+    --stop        stop the background daemon`,
 } as const;
 
 type CommandName = keyof typeof COMMAND_HELP;
@@ -77,7 +77,7 @@ async function main(): Promise<void> {
           force: { type: "boolean", short: "f" },
           include: { type: "string" },
           only: { type: "string" },
-          "no-skill": { type: "boolean" },
+          "install-skill": { type: "boolean" },
         },
         strict: true,
       });
@@ -86,7 +86,7 @@ async function main(): Promise<void> {
         force: values.force,
         include: values.include,
         only: values.only,
-        installSkill: !values["no-skill"],
+        installSkill: values["install-skill"],
       });
       return;
     }

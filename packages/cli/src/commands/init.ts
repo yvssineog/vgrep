@@ -1,14 +1,37 @@
-import { resolve } from "node:path";
-import type { VgrepConfig } from "@vgrep/core";
+import { join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import {
+  readIgnoreText,
+  resolveProfileFilters,
+  SidecarClient,
+  type MerkleNode,
+  type VgrepConfig,
+} from "@vgrep/core";
 import { c, header, row } from "../style";
-import { ensureConfig, ensureVgrepIgnore } from "../config";
-import { indexProject } from "../indexing/index-project";
+import {
+  FILES,
+  ensureConfig,
+  ensureVgrepIgnore,
+  readMerkleJson,
+  vgrepDir,
+} from "../config";
+import { runIndex } from "../indexing/index-project";
+
+const HOME_VGREP_DIR = join(homedir(), ".vgrep");
+const MODEL_DIR = join(HOME_VGREP_DIR, "models");
+const FIRST_RUN_MARKER = join(HOME_VGREP_DIR, ".initialized");
 
 /**
- * `vgrep init` - Build (or rebuild) the local index for the current project.
+ * `vgrep init` — Build (or rebuild) the local index for the current project.
  *
- * - First run: scaffolds config/ignore files, builds the tree, persists it
- * - Subsequent runs: rebuilds, diffs against previous state, indexes changes
+ * - First run: scaffolds config + ignore, walks the tree, embeds every chunk
+ * - Subsequent runs: walks again, diffs against `.vgrep/merkle.json`,
+ *   embeds only the changed files
+ *
+ * All heavy work happens in the Mojo sidecar; we spawn a one-shot instance
+ * here (the long-lived sidecar belongs to `vgrep watch --daemon`).
  */
 export async function initCommand(options: {
   path?: string;
@@ -20,6 +43,12 @@ export async function initCommand(options: {
   const projectRoot = resolve(options.path ?? process.cwd());
 
   console.log(header("init", projectRoot));
+
+  const firstEverRun = !existsSync(FIRST_RUN_MARKER);
+  await mkdir(MODEL_DIR, { recursive: true });
+  if (firstEverRun) {
+    console.log(row("model", `downloading to ${c.dim(MODEL_DIR)}`));
+  }
 
   const config = await ensureConfig(projectRoot);
   const activeProfiles = resolveProfiles(config, options);
@@ -40,40 +69,98 @@ export async function initCommand(options: {
     }
   }
 
-  await indexProject({ projectRoot, config, activeProfiles });
+  const previous = await loadPreviousTree(projectRoot);
+  const ignoreText = await readIgnoreText(projectRoot);
+  const { extensions, filenames } = resolveProfileFilters(
+    activeProfiles,
+    config.fileProfiles ?? {},
+  );
 
-  if (options.installSkill !== false) {
+  const sidecar = new SidecarClient({
+    projectRoot,
+    env: sidecarEnv(firstEverRun),
+  });
+  await sidecar.start();
+  try {
+    await sidecar.open({
+      projectRoot,
+      dbPath: join(vgrepDir(projectRoot), FILES.index),
+      cacheDir: join(vgrepDir(projectRoot), FILES.cache),
+      extensions,
+      filenames,
+      ignoreText,
+    });
+    await runIndex({ sidecar, projectRoot, previous });
+  } finally {
+    await sidecar.close();
+  }
+
+  if (firstEverRun) {
+    await writeFile(FIRST_RUN_MARKER, new Date().toISOString());
+  }
+
+  if (options.installSkill === true) {
     await installVgrepSkill(projectRoot);
   }
+}
+
+function sidecarEnv(firstRun: boolean): Record<string, string> {
+  // Pin HF + transformers cache under ~/.vgrep so the model is downloaded
+  // once globally (not per-project) and quiet the noisy progress bars on
+  // every spawn — first-run downloads still get rendered.
+  const env: Record<string, string> = {
+    HF_HOME: MODEL_DIR,
+    HF_HUB_CACHE: MODEL_DIR,
+    TRANSFORMERS_CACHE: MODEL_DIR,
+    SENTENCE_TRANSFORMERS_HOME: MODEL_DIR,
+    TRANSFORMERS_VERBOSITY: "error",
+    TRANSFORMERS_NO_ADVISORY_WARNINGS: "1",
+    TOKENIZERS_PARALLELISM: "false",
+  };
+  if (!firstRun) {
+    env.HF_HUB_DISABLE_PROGRESS_BARS = "1";
+    env.HF_HUB_DISABLE_TELEMETRY = "1";
+  }
+  return env;
+}
+
+async function loadPreviousTree(projectRoot: string): Promise<MerkleNode | null> {
+  const json = await readMerkleJson(projectRoot);
+  if (!json) return null;
+  return JSON.parse(json) as MerkleNode;
 }
 
 const SKILL_SOURCE = "github:yvssineog/vgrep";
 
 async function installVgrepSkill(projectRoot: string): Promise<void> {
-  console.log();
-  console.log(c.dim("running: npx skills add (interactive)"));
+  // Non-interactive install: we pin every prompt the installer asks
+  // (target agent, scope, method) so it never blocks the terminal and
+  // never paints its 80-column box-drawing UI over our log lines.
   const proc = Bun.spawn(
-    ["npx", "--yes", "skills", "add", SKILL_SOURCE, "--skill", "vgrep"],
+    [
+      "npx", "--yes", "skills", "add", SKILL_SOURCE,
+      "--skill", "vgrep",
+      "--agent", "claude-code",
+      "--scope", "project",
+      "--method", "symlink",
+      "--yes",
+    ],
     {
       cwd: projectRoot,
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "pipe",
     },
   );
+  const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
-  console.log();
 
   if (exitCode === 0) {
     console.log(row("skill", c.green("installed")));
   } else {
+    const hint = stderr.trim().split("\n").pop() ?? "";
     console.log(
-      row(
-        "skill",
-        c.yellow(
-          `skipped (exit ${exitCode}) - re-run with: npx skills add ${SKILL_SOURCE} --skill vgrep`,
-        ),
-      ),
+      row("skill", c.yellow(`skipped (exit ${exitCode}) ${c.dim(hint)}`)),
     );
   }
 }

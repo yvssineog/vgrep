@@ -13,8 +13,9 @@ export const FILES = {
   merkle: "merkle.json",
   index: "index.db",
   cache: "cache",
-  watchPid: "watch.pid",
-  watchLog: "watch.log",
+  daemonPid: "daemon.pid",
+  daemonLog: "daemon.log",
+  daemonSock: "daemon.sock",
 } as const;
 
 /**
@@ -135,6 +136,15 @@ build/
 .next/
 .turbo/
 coverage/
+.pixi/
+.venv/
+venv/
+__pycache__/
+target/
+out/
+.cache/
+.idea/
+.vscode/
 
 # Logs
 *.log
