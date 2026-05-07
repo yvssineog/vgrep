@@ -1,5 +1,4 @@
 import { join } from "node:path";
-import { Effect } from "effect";
 import { basename, toRelative } from "./util/paths";
 
 /**
@@ -47,16 +46,18 @@ export function mergeIgnore(target: IgnoreRules, src: IgnoreRules): void {
   target.globPatterns.push(...src.globPatterns);
 }
 
-/** Read `<rootDir>/.vgrepignore` if present; otherwise return empty rules. */
-export const loadIgnore = (rootDir: string): Effect.Effect<IgnoreRules, Error> =>
-  Effect.tryPromise({
-    try: async () => {
-      const file = Bun.file(join(rootDir, VGREPIGNORE_FILE));
-      if (!(await file.exists())) return emptyIgnore();
-      return parseIgnore((await file.text()).split("\n"));
-    },
-    catch: (e) => (e instanceof Error ? e : new Error(String(e))),
-  });
+/** Read `<rootDir>/.vgrepignore` raw text — empty string if absent. */
+export async function readIgnoreText(rootDir: string): Promise<string> {
+  const file = Bun.file(join(rootDir, VGREPIGNORE_FILE));
+  if (!(await file.exists())) return "";
+  return file.text();
+}
+
+/** Parse the raw text into rules (used by the poller's quick directory skip). */
+export async function loadIgnore(rootDir: string): Promise<IgnoreRules> {
+  const text = await readIgnoreText(rootDir);
+  return text ? parseIgnore(text.split("\n")) : emptyIgnore();
+}
 
 /** Match a relative path against a rule set. */
 export function matchesIgnore(rules: IgnoreRules, relativePath: string): boolean {

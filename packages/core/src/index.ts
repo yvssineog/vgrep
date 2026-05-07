@@ -1,64 +1,54 @@
-// @vgrep/core — Public API
+// @vgrep/core — public surface
+//
+// All heavy lifting (chunking, embedding, vector search, merkle hashing)
+// lives in the Mojo sidecar (`@vgrep/core-mojo`). This package exposes:
+//
+//   - The TS types that flow over the wire (no behavior change for callers
+//     that already consume `MerkleNode`, `SearchResult`, etc.)
+//   - The sidecar client and its protocol types
+//   - Path/ignore helpers the Bun parent still needs for the watch poller
+//
+// Anything that used to import `localEngine`, `chunkFile`, `embedChunksEffect`,
+// or `buildMerkleTree` should now go through `SidecarClient` instead.
 
-// Types
 export type {
-  MerkleNode,
   ChangedFile,
   ChangeType,
   CodeChunk,
+  FileProfile,
   IndexEntry,
+  MerkleNode,
   SearchResult,
+  TreeStats,
   VgrepConfig,
   VgrepMode,
-  TreeStats,
 } from "./types";
 
-// Merkle Tree
-export {
-  MerkleTree,
-  buildMerkleTree,
-  collectFileHashes,
-  deserializeTree,
-  treeStats,
-} from "./merkle/tree";
-export { updateMerkleTree, type MerkleUpdateResult } from "./merkle/updater";
-export { diffTrees } from "./merkle/diff";
+export { SidecarClient, type SidecarClientOptions } from "./sidecar/client";
+export type {
+  ApplyDiffParams,
+  ApplyDiffResult,
+  BuildTreeResult,
+  ErrorFrame,
+  Frame,
+  Method,
+  OpenParams,
+  ProgressFrame,
+  ResultFrame,
+  SearchOk,
+  SearchParams,
+  UpdateTreeParams,
+  UpdateTreeResult,
+} from "./sidecar/protocol";
 
-// Ignore rules + path helpers (shared between core and CLI)
+export { DEFAULT_FILE_PROFILES, resolveProfileFilters } from "./profiles";
 export {
   emptyIgnore,
   loadIgnore,
   matchesIgnore,
   mergeIgnore,
   parseIgnore,
+  readIgnoreText,
   type IgnoreRules,
 } from "./ignore";
 export * as paths from "./util/paths";
-
-// Simhash
-export { computeSimhash, hammingDistance } from "./simhash/simhash";
-
-// Chunking
-export { chunkFile, initTreeSitter } from "./chunking/chunker";
-export {
-  DEFAULT_FILE_PROFILES,
-  createIndexableFileMatcher,
-  detectLanguage,
-  hasGrammar,
-  isIndexableTextFile,
-} from "./chunking/languages";
-
-// Embeddings
-export { readCachedVector, writeCachedVector } from "./embedding/cache";
-export {
-  embedChunksEffect,
-  embedTextEffect,
-  type EmbeddingModel,
-} from "./embedding/embedder";
-export {
-  transformersEmbedding,
-  type TransformersEmbeddingOptions,
-} from "./embedding/transformers";
-
-// Vector engine
-export { localEngine, type LocalEngineE } from "./engine/local-engine";
