@@ -109,6 +109,17 @@ async function runScenario(
       lastInit.notes = summarizeInit(initStdout);
     }
 
+    await timer.time(
+      "watch_start",
+      async () => {
+        const r = await sandbox.vgrepWatchStart();
+        if (r.exitCode !== 0) {
+          throw new Error(`vgrep watch --start failed:\n${r.stderr}`);
+        }
+      },
+      { notes: "model warm, socket ready" },
+    );
+
     const agentResult = await timer.time(
       "agent_total",
       () =>
@@ -168,6 +179,10 @@ async function runScenario(
     );
     console.log(`report   ${reportPath}`);
   } finally {
+    // Stop the watch daemon before tearing down the sandbox dir; otherwise
+    // the daemon process is left orphaned holding a unix socket on a path
+    // that no longer exists.
+    await sandbox.vgrepWatchStop().catch(() => {});
     await sandbox.destroy();
   }
 }

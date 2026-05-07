@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "bench": "bun run src/run.ts",
+    "bench:core": "bun run src/core-bench.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

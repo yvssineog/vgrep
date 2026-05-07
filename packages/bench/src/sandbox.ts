@@ -61,6 +61,19 @@ export class LocalSandbox {
     });
   }
 
+  /**
+   * Start the watch daemon in the sandbox and block until it's serving the
+   * `/health` endpoint — i.e. the embedding model is loaded and the SQLite
+   * handle is open. Subsequent `vgrep search` calls hit a hot process.
+   */
+  async vgrepWatchStart(): Promise<RunResult> {
+    return this.run("vgrep", ["watch", "--start"], { timeoutMs: 60_000 });
+  }
+
+  async vgrepWatchStop(): Promise<RunResult> {
+    return this.run("vgrep", ["watch", "--stop"], { timeoutMs: 10_000 });
+  }
+
   async run(
     cmd: AllowedCommand,
     args: string[],
