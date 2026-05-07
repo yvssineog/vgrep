@@ -11,6 +11,19 @@ build/
 .turbo/
 coverage/
 .sst/
+.pixi/
+.venv/
+venv/
+__pycache__/
+target/
+out/
+.cache/
+.idea/
+.vscode/
+.agents/
+.claude/
+.tmp-tests/
+skills/
 
 # Logs
 *.log
