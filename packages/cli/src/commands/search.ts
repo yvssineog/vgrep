@@ -1,11 +1,19 @@
-import { join, resolve } from "node:path";
-import { Effect } from "effect";
-import { localEngine } from "@vgrep/core";
+import { resolve } from "node:path";
 import { c, clearStatus, header, status } from "../style";
-import { FILES, isInitialized, vgrepDir } from "../config";
+import { isInitialized } from "../config";
+import { searchViaDaemon } from "../daemon/client";
 
 const DEFAULT_TOP_K = 3;
 
+/**
+ * `vgrep search` — semantic kNN search over the local index.
+ *
+ * Search always goes through the watch daemon's Unix socket: the daemon
+ * already holds a hot model + SQLite handle, so the round-trip is dominated
+ * by the embedding of the query itself rather than process startup. If no
+ * daemon is running, we auto-spawn `vgrep watch --daemon` and wait for it
+ * to come up before issuing the request.
+ */
 export async function searchCommand(
   query: string | string[],
   options: { path?: string; topK?: string },
@@ -22,33 +30,27 @@ export async function searchCommand(
   }
 
   status("searching...");
-
-  const program = Effect.scoped(
-    Effect.flatMap(
-      localEngine({
-        dbPath: join(vgrepDir(projectRoot), FILES.index),
-        cacheDir: join(vgrepDir(projectRoot), FILES.cache),
-      }),
-      (engine) => engine.search(queryText, topK),
-    ),
-  );
-
-  const results = await Effect.runPromise(
-    Effect.either(program),
-  );
-  clearStatus();
-
-  if (results._tag === "Left") {
-    console.log(`${c.red("search failed")} ${c.dim(results.left.message)}`);
+  let results;
+  try {
+    results = await searchViaDaemon(
+      projectRoot,
+      { query: queryText, topK },
+      { onSpawn: () => status("starting daemon...") },
+    );
+  } catch (err) {
+    clearStatus();
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(`${c.red("search failed")} ${c.dim(msg)}`);
     process.exit(1);
   }
+  clearStatus();
 
-  if (results.right.length === 0) {
+  if (results.length === 0) {
     console.log(c.dim("no results"));
     return;
   }
 
-  for (const [i, result] of results.right.entries()) {
+  for (const [i, result] of results.entries()) {
     if (i > 0) console.log();
     const location = `${c.cyan(result.filePath)}${c.dim(`:${result.startLine}-${result.endLine}`)}`;
     const score = c.dim(result.score.toFixed(3));
