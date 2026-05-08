@@ -47,15 +47,34 @@ echo "→ building CLI ($TARGET)"
 (cd "$REPO_ROOT/packages/cli" && bun run "build:$TARGET" >/dev/null)
 install -m 0755 "$REPO_ROOT/packages/cli/dist/vgrep-$TARGET" "$BIN_DIR/vgrep"
 
+# ── pre-warm the embedding model ──────────────────────────────────────
+# Download `all-MiniLM-L6-v2` weights + run one encode so the MAX graph
+# is compiled and HF metadata is cached. After this, every `vgrep init`
+# can run with HF_HUB_OFFLINE=1 and skips the cold network round-trip.
+#
+# `max encode` is single-shot: it loads, embeds, exits. The compile cost
+# (~340ms) is amortized into this one-time install step.
+echo "→ pre-warming embedding model"
+HF_HOME="$MODEL_DIR" HF_HUB_DISABLE_PROGRESS_BARS=0 HF_HUB_DISABLE_TELEMETRY=1 \
+TOKENIZERS_PARALLELISM=false MODULAR_TELEMETRY_DISABLED=1 \
+"$PIXI" run --manifest-path "$MANIFEST" -- \
+  max encode --devices=cpu \
+  --model sentence-transformers/all-MiniLM-L6-v2 \
+  --max-length 256 \
+  --prompt "vgrep semantic search" \
+  >/dev/null || echo "  ! pre-warm failed; first vgrep init will pay the cold-start cost"
+
 # ── install manifest ──────────────────────────────────────────────────
 # The compiled CLI reads this to find the sidecar + the pixi env that
-# hosts its Python deps (sentence-transformers, tree_sitter, sqlite3).
+# hosts its Python deps (max engine, tree_sitter, sqlite3).
+ENV_PREFIX="$REPO_ROOT/packages/core-mojo/.pixi/envs/default"
 cat >"$VGREP_HOME/install.json" <<EOF
 {
   "version": "0.1.0",
   "sidecarBinary": "$BIN_DIR/vgrep-core",
   "pixi": "$PIXI",
   "pixiManifest": "$MANIFEST",
+  "envPrefix": "$ENV_PREFIX",
   "modelDir": "$MODEL_DIR",
   "installedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }

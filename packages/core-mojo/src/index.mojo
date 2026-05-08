@@ -15,13 +15,14 @@ of the heavy lifting.
 from std.python import PythonObject, Python
 from std.os.path import join
 from std.pathlib import Path
+from std.time import perf_counter_ns
 
 from chunker import CodeChunk, chunk_file
 from embedder import Embedder
 from vectors import VectorIndex, ChunkMeta
 from store import ChunkStore, StoredChunk
 from cache import read_cached, write_cached
-from protocol import FRAME_PROGRESS, emit_frame
+from protocol import FRAME_PROGRESS, emit_frame, emit_phase
 
 
 comptime EMBED_BATCH_SIZE = 256
@@ -39,7 +40,7 @@ def apply_diff(
     project_root: String,
     cache_dir: String,
     changes: PythonObject,  # list of {path,type,hash?}
-    embedder: Embedder,
+    mut embedder: Embedder,
     mut store: ChunkStore,
     mut index: VectorIndex,
 ) raises -> ApplyDiffStats:
@@ -74,6 +75,7 @@ def apply_diff(
     for _ in range(n_index):
         per_file_chunks.append(List[CodeChunk]())
     _emit_progress(request_id, "chunk", 0, n_index)
+    var t_chunk = perf_counter_ns()
     for i in range(n_index):
         try:
             var rel = index_paths[i]
@@ -86,9 +88,14 @@ def apply_diff(
         # on big repos without overwhelming the pipe.
         if (i + 1) % 32 == 0 or i + 1 == n_index:
             _emit_progress(request_id, "chunk", i + 1, n_index)
+    emit_phase(request_id, String("chunk_total"),
+               perf_counter_ns() - t_chunk,
+               String(n_index) + String(" files, ")
+                 + String(failures) + String(" failed"))
 
     # 3. Flatten + cache lookup. We only embed the cache misses; hits go
     #    straight into the upsert/index path with the cached vector.
+    var t_cache = perf_counter_ns()
     var pending_chunks = List[CodeChunk]()  # cache misses
     var pending_texts = List[String]()
     var ready_chunks = List[CodeChunk]()    # cache hits
@@ -105,12 +112,25 @@ def apply_diff(
             else:
                 pending_chunks.append(c.copy())
                 pending_texts.append(c.content)
+    emit_phase(request_id, String("cache_lookup"),
+               perf_counter_ns() - t_cache,
+               String(ready_chunks.__len__()) + String(" hits / ")
+                 + String(produced) + String(" total"))
+
+    # Join the off-thread MAX warm before we start emitting progress
+    # for the embed step. If `_open` submitted `warm_async`, this
+    # blocks here for whatever's still left of the import + graph
+    # compile. If chunking already overlapped most of it, this is a
+    # no-op; on small repos it ends up dominating the indexing phase
+    # because there's nothing else to overlap with.
+    embedder.warm(request_id=request_id)
 
     _emit_progress(request_id, "embed", 0, pending_chunks.__len__())
 
     # 4. Embed the misses in fixed-size batches. The model is single-
     #    threaded internally, so we batch sequentially — the GPU/torch
     #    runtime parallelizes per-batch.
+    var t_embed = perf_counter_ns()
     var pending_vectors = List[List[Float32]]()
     var i_batch = 0
     while i_batch < pending_chunks.__len__():
@@ -135,6 +155,9 @@ def apply_diff(
                 pass
         _emit_progress(request_id, "embed", end, pending_chunks.__len__())
         i_batch = end
+    emit_phase(request_id, String("embed_total"),
+               perf_counter_ns() - t_embed,
+               String(pending_chunks.__len__()) + String(" embedded"))
 
     # 5. Upsert everything (cache hits + freshly-embedded) into both stores.
     var stored = List[StoredChunk]()
@@ -159,7 +182,13 @@ def apply_diff(
             vector=pending_vectors[i].copy(),
         ))
 
+    var t_db_upsert = perf_counter_ns()
     store.upsert_many(stored)
+    emit_phase(request_id, String("db_upsert"),
+               perf_counter_ns() - t_db_upsert,
+               String(stored.__len__()) + String(" rows"))
+
+    var t_idx_upsert = perf_counter_ns()
     for s in stored:
         index.upsert(
             s.chunk_hash,
@@ -172,6 +201,9 @@ def apply_diff(
             ),
             s.vector.copy(),
         )
+    emit_phase(request_id, String("index_upsert"),
+               perf_counter_ns() - t_idx_upsert,
+               String("in-mem matrix grow + norm"))
 
     return ApplyDiffStats(
         indexed_chunks=stored.__len__(),

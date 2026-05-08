@@ -17,6 +17,9 @@ fixed step (matches the previous TS fallback exactly).
 """
 
 from std.python import PythonObject, Python
+from std.hashlib.hash import hash
+
+from hash import hex_u64
 
 
 comptime _MIN_LINES = 4
@@ -187,13 +190,10 @@ def _make_chunk(
     start_line: Int,
     end_line: Int,
 ) raises -> CodeChunk:
-    var hashlib = Python.import_module("hashlib")
-    var py = Python.import_module("builtins")
-    var h = hashlib.sha256(py.bytes(content, "utf-8"))
     return CodeChunk(
         file_path=file_path,
         content=content,
-        chunk_hash=String(py=h.hexdigest()),
+        chunk_hash=hex_u64(UInt64(hash(content))),
         start_line=start_line,
         end_line=end_line,
         language=lang,

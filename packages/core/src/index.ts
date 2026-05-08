@@ -24,7 +24,12 @@ export type {
   VgrepMode,
 } from "./types";
 
-export { SidecarClient, type SidecarClientOptions } from "./sidecar/client";
+export {
+  SidecarClient,
+  type RequestObservers,
+  type SidecarClientOptions,
+} from "./sidecar/client";
+export { sidecarEnv } from "./sidecar/env";
 export type {
   ApplyDiffParams,
   ApplyDiffResult,
@@ -33,6 +38,7 @@ export type {
   Frame,
   Method,
   OpenParams,
+  PhaseFrame,
   ProgressFrame,
   ResultFrame,
   SearchOk,

@@ -23,8 +23,9 @@ preserve — it keeps incremental indexing O(changed files), not O(repo).
 """
 
 from std.python import PythonObject, Python
+from std.hashlib.hash import hash
 
-from hash import FileHash, hash_many
+from hash import FileHash, hash_many, hex_u64
 from walk import FileEntry
 
 
@@ -80,7 +81,6 @@ def _dirname(rel: String) raises -> String:
 def _fold_directories(dir_path: String, by_dir: PythonObject) raises -> PythonObject:
     """Recursively build a directory node from its file children + nested dirs."""
     var py = Python.import_module("builtins")
-    var hashlib = Python.import_module("hashlib")
     var posixpath = Python.import_module("posixpath")
 
     var children = py.list()
@@ -110,14 +110,17 @@ def _fold_directories(dir_path: String, by_dir: PythonObject) raises -> PythonOb
 
     children = py.sorted(children, key=Python.evaluate("lambda c: c['path']"))
 
-    var h = hashlib.sha256()
+    # Concatenate child hashes (already hex strings) and hash with the
+    # native Mojo hasher. Bit-for-bit deterministic across runs since
+    # children are sorted lexicographically above.
+    var combined = String("")
     for c in children:
-        h.update(py.str(c["hash"]).encode("utf-8"))
+        combined += String(py.str(c["hash"]))
 
     var node = py.dict()
     node["path"] = dir_path
     node["type"] = "directory"
-    node["hash"] = h.hexdigest()
+    node["hash"] = hex_u64(UInt64(hash(combined)))
     node["children"] = children
     return node
 

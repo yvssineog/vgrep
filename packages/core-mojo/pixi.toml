@@ -18,16 +18,15 @@ test    = "mojo run tests/run.mojo"
 fmt     = "mojo format src/"
 
 [dependencies]
-# `mojo` is the canonical package name on the modular channel. It pulls
-# in MAX (the runtime that hosts ONNX/torch tensors used by the embedder).
-mojo = "*"
+# `modular` ships the full toolchain: `mojo` (compiler) + `max` (runtime CLI
+# for `max serve` / `max encode`). The MAX engine is what we use for
+# embedding inference — no torch, no sentence-transformers in the sidecar.
+modular = "*"
 python = ">=3.11,<3.13"
 
 [pypi-dependencies]
-# Tree-sitter parsing: per-language grammars + the runtime.
+# Tree-sitter parsing: per-language grammars + the runtime. The embedding
+# pipeline runs out-of-process via `max serve`, so its deps don't leak
+# into the sidecar's import graph.
 "tree-sitter" = ">=0.23"
 "tree-sitter-language-pack" = ">=0.7"
-# Embeddings: sentence-transformers wraps HF + provides cosine-friendly outputs.
-"sentence-transformers" = ">=3.0"
-# Used by sentence-transformers for ONNX/torch backends; let pip resolve.
-"numpy" = ">=1.26"

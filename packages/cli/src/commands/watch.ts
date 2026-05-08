@@ -14,6 +14,7 @@ import {
   readIgnoreText,
   resolveProfileFilters,
   SidecarClient,
+  sidecarEnv,
   type MerkleNode,
   type VgrepConfig,
 } from "@vgrep/core";
@@ -32,6 +33,17 @@ import { daemonPaths, type SearchRequest, type SearchResponse } from "../daemon/
 const DEBOUNCE_MS = 500;
 const POLL_MS = 2000;
 const LOG_TAIL_LINES = 80;
+/**
+ * The auto-spawned daemon shuts itself down after this many milliseconds
+ * with no `/search` traffic. The poller keeps running in the background
+ * but it doesn't count as "user activity" — we don't want the daemon to
+ * stay warm just because someone saved a file. Override with the
+ * `VGREP_IDLE_TIMEOUT_MS` env var (set to `0` to disable idle shutdown
+ * entirely, e.g. for `vgrep watch --start` operators who want the
+ * indexer always-on).
+ */
+const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+const IDLE_CHECK_MS = 60 * 1000;
 
 /** Runtime directories the poller never traverses, even without a `.vgrepignore`. */
 const HARD_SKIP_DIRS = new Set([
@@ -137,7 +149,12 @@ const runWatcher = (params: {
     const sidecar = yield* Effect.acquireRelease(
       Effect.tryPromise({
         try: async () => {
-          const client = new SidecarClient({ projectRoot });
+          // Use the same offline/quiet env init.ts uses. Without this the
+          // daemon's sidecar hangs on first run trying to phone home to HF.
+          const client = new SidecarClient({
+            projectRoot,
+            env: sidecarEnv(false),
+          });
           await client.start();
           const ignoreText = await readIgnoreText(projectRoot);
           const { extensions, filenames } = resolveProfileFilters(
@@ -178,17 +195,28 @@ const runWatcher = (params: {
     const dPaths = daemonPaths(projectRoot);
     yield* ensureFreshSocket(dPaths.sock);
 
+    // Mutable last-search timestamp, bumped from inside the request
+    // handler (which runs outside the Effect scope). The idle watchdog
+    // reads this directly. Plain ref over `Ref.Ref<number>` keeps the
+    // handler synchronous.
+    const lastSearch = { value: Date.now() };
+    const idleTimeoutMs = resolveIdleTimeoutMs();
+
     yield* Effect.fork(installShutdownHandler(shutdown, projectRoot, cleanupPid));
     yield* Effect.fork(forkLog(pollLoop(env, metadata, candidates), "poll"));
     yield* Effect.fork(
       forkLog(indexLoop(env, candidates, root, sidecar), "update"),
     );
+    if (idleTimeoutMs > 0) {
+      yield* Effect.fork(idleWatchdog(lastSearch, idleTimeoutMs, shutdown));
+    }
 
     const server = Bun.serve({
       unix: dPaths.sock,
       async fetch(req) {
         const url = new URL(req.url);
         if (req.method === "POST" && url.pathname === "/search") {
+          lastSearch.value = Date.now();
           return handleSearch(req, sidecar);
         }
         if (req.method === "GET" && url.pathname === "/health") {
@@ -258,6 +286,43 @@ const forkLog = <A>(
     ),
     Effect.asVoid,
   );
+
+/**
+ * Background fiber that fulfills `shutdown` after `idleMs` of no
+ * `/search` activity. Keeps the auto-spawned daemon honest — users
+ * shouldn't have to think about an indexer process they didn't ask
+ * to start. `vgrep watch --start` operators can disable this by
+ * setting `VGREP_IDLE_TIMEOUT_MS=0`.
+ */
+const idleWatchdog = (
+  lastSearch: { value: number },
+  idleMs: number,
+  shutdown: Deferred.Deferred<void>,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    while (true) {
+      yield* Effect.sleep(Duration.millis(IDLE_CHECK_MS));
+      const elapsed = Date.now() - lastSearch.value;
+      if (elapsed >= idleMs) {
+        console.log(
+          row(
+            "watch",
+            c.dim(`idle for ${Math.round(elapsed / 60000)}m, shutting down`),
+          ),
+        );
+        yield* Deferred.succeed(shutdown, undefined);
+        return;
+      }
+    }
+  });
+
+function resolveIdleTimeoutMs(): number {
+  const raw = process.env.VGREP_IDLE_TIMEOUT_MS;
+  if (raw === undefined) return DEFAULT_IDLE_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_IDLE_TIMEOUT_MS;
+  return parsed;
+}
 
 const installShutdownHandler = (
   shutdown: Deferred.Deferred<void>,

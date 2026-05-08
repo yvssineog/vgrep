@@ -9,6 +9,7 @@ import type {
   Frame,
   Method,
   OpenParams,
+  PhaseFrame,
   ProgressFrame,
   ResultFrame,
   SearchOk,
@@ -34,6 +35,12 @@ type Pending = {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
   onProgress?: (frame: ProgressFrame) => void;
+  onPhase?: (frame: PhaseFrame) => void;
+};
+
+export type RequestObservers = {
+  onProgress?: (frame: ProgressFrame) => void;
+  onPhase?: (frame: PhaseFrame) => void;
 };
 
 export interface SidecarClientOptions {
@@ -83,27 +90,42 @@ export class SidecarClient {
     return this.request<{ ok: boolean }>("health", {});
   }
 
-  async open(params: OpenParams): Promise<{ ok: boolean }> {
-    return this.request<{ ok: boolean }>("open", params);
+  async open(
+    params: OpenParams,
+    observers?: RequestObservers,
+  ): Promise<{ ok: boolean }> {
+    return this.request<{ ok: boolean }>("open", params, observers);
   }
 
-  async buildTree(): Promise<BuildTreeResult> {
-    return this.request<BuildTreeResult>("merkle.build", {});
+  async buildTree(observers?: RequestObservers): Promise<BuildTreeResult> {
+    return this.request<BuildTreeResult>("merkle.build", {}, observers);
   }
 
-  async updateTree(params: UpdateTreeParams): Promise<UpdateTreeResult> {
-    return this.request<UpdateTreeResult>("merkle.update", params);
+  async updateTree(
+    params: UpdateTreeParams,
+    observers?: RequestObservers,
+  ): Promise<UpdateTreeResult> {
+    return this.request<UpdateTreeResult>("merkle.update", params, observers);
   }
 
   async applyDiff(
     params: ApplyDiffParams,
-    onProgress?: (frame: ProgressFrame) => void,
+    onProgressOrObservers?:
+      | ((frame: ProgressFrame) => void)
+      | RequestObservers,
   ): Promise<ApplyDiffResult> {
-    return this.request<ApplyDiffResult>("index.applyDiff", params, onProgress);
+    const observers =
+      typeof onProgressOrObservers === "function"
+        ? { onProgress: onProgressOrObservers }
+        : onProgressOrObservers;
+    return this.request<ApplyDiffResult>("index.applyDiff", params, observers);
   }
 
-  async search(params: SearchParams): Promise<SearchOk> {
-    return this.request<SearchOk>("search", params);
+  async search(
+    params: SearchParams,
+    observers?: RequestObservers,
+  ): Promise<SearchOk> {
+    return this.request<SearchOk>("search", params, observers);
   }
 
   async close(): Promise<void> {
@@ -123,7 +145,7 @@ export class SidecarClient {
   private request<T>(
     method: Method,
     params: unknown,
-    onProgress?: (frame: ProgressFrame) => void,
+    observers?: RequestObservers,
   ): Promise<T> {
     if (!this.proc) throw new Error("sidecar not started");
     const id = `r${this.nextId++}`;
@@ -132,7 +154,8 @@ export class SidecarClient {
       this.pending.set(id, {
         resolve: resolve as (value: unknown) => void,
         reject,
-        onProgress,
+        onProgress: observers?.onProgress,
+        onPhase: observers?.onPhase,
       });
       try {
         // Bun.Subprocess.stdin is a FileSink — write returns a number, not a
@@ -200,6 +223,10 @@ export class SidecarClient {
 
     if (frame.type === "progress") {
       entry.onProgress?.(frame);
+      return;
+    }
+    if (frame.type === "phase") {
+      entry.onPhase?.(frame);
       return;
     }
     this.pending.delete(frame.id);
@@ -303,6 +330,10 @@ const NOISE_PATTERNS: RegExp[] = [
   /Downloading shards:/,
   /Fetching \d+ files:/,
   /^TF_CPP_/,
+  // MAX's safetensors loader announces every non-float dtype it finds
+  // (e.g. token_type_ids stored as I64). Harmless and printed once per
+  // weight scan — filter it out.
+  /unknown dtype found in safetensors file/,
 ];
 
 function isNoiseLine(line: string): boolean {

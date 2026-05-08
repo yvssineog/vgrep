@@ -30,6 +30,25 @@ comptime METHOD_SEARCH = "search"
 comptime FRAME_RESULT = "result"
 comptime FRAME_ERROR = "error"
 comptime FRAME_PROGRESS = "progress"
+comptime FRAME_PHASE = "phase"
+
+
+def emit_phase(id: String, name: String, ns: UInt, notes: String = "") raises:
+    """Emit a single completed-step timing frame.
+
+    Distinct from `progress` (incremental done/total): a `phase` frame
+    fires once per discrete step with its measured duration, so the
+    bench harness can attach it as a child of the parent request and
+    show where time actually went without us having to maintain a
+    parallel timing channel from the parent process.
+    """
+    var py = Python.import_module("builtins")
+    var payload = py.dict()
+    payload["name"] = name
+    payload["ns"] = Int(ns)
+    if notes.byte_length() > 0:
+        payload["notes"] = notes
+    emit_frame(id, FRAME_PHASE, payload)
 
 
 def emit_frame(id: String, kind: String, payload: PythonObject) raises:
@@ -54,16 +73,21 @@ def emit_frame(id: String, kind: String, payload: PythonObject) raises:
 def read_request() raises -> PythonObject:
     """Block on stdin for one NDJSON request line; returns a Python dict.
 
-    `input()` raises EOFError when stdin closes; we surface that as
-    `Error("EOF")` so `main` can treat it as a clean shutdown.
+    We delegate the read to Python's `sys.stdin.readline()` rather than
+    Mojo's `input()` because the latter has a buffering quirk in 1.0.0b1
+    that returns empty on the second read when stdin is a non-tty pipe —
+    which is exactly the situation when Bun spawns the sidecar with
+    `stdin: "pipe"`. `sys.stdin` honors line buffering correctly.
     """
-    try:
-        var line = input()
-        if line.byte_length() == 0:
-            raise Error("EOF")
-        var json = Python.import_module("builtins").__import__("json")
-        return json.loads(line)
-    except:
-        # `input()` raises on EOF (Mojo wraps as Error). Normalize so
-        # the caller's match is simple.
+    var sys_mod = Python.import_module("sys")
+    var raw = sys_mod.stdin.readline()
+    var py = Python.import_module("builtins")
+    if Int(py=py.len(raw)) == 0:
         raise Error("EOF")
+    var line = String(py=py.str(raw).rstrip("\n"))
+    if line.byte_length() == 0:
+        # Empty line — skip and try again. (Don't treat as EOF; only
+        # zero-byte readline means EOF.)
+        return read_request()
+    var json = Python.import_module("builtins").__import__("json")
+    return json.loads(line)

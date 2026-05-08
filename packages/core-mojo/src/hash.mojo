@@ -1,23 +1,32 @@
-"""SHA-256 file hashing.
+"""Native Mojo file hashing.
 
-The hash itself goes through Python's `hashlib.sha256` — that
-dispatches to OpenSSL / CommonCrypto with the SHA-NI / ARMv8 SHA
-extensions, so we get hardware-accelerated SHA without writing the
-intrinsics ourselves.
+Hash + I/O are both native Mojo:
+  - `std.pathlib.Path.read_text()` for the file read
+  - `std.hashlib.hash` for the digest (fast non-cryptographic hash)
+  - `std.algorithm.parallelize` for cross-core fan-out
 
-We deliberately do *not* run hashing through Mojo's `parallelize` —
-every file read goes through the Python C API (`pathlib.Path.read_bytes`,
-`hashlib.sha256`), and that requires the GIL. Calling those from
-multiple Mojo worker threads concurrently triggers a fatal abort
-("UniversalExceptionRaise: (os/kern) failure (5)") inside libpython.
+We don't need preimage resistance — the merkle tree only needs stable
+keys for change detection. Switching off SHA-256 means existing
+`.vgrep/merkle.json` files don't match new hashes, so the first run
+after upgrading reindexes from scratch.
 
-Parallelism for the I/O-bound part lives Python-side via a
-`ThreadPoolExecutor` — Python releases the GIL across `read_bytes`
-and inside the OpenSSL/CommonCrypto SHA core, so we still get the
-disk-bound speedup without violating GIL invariants.
+The previous implementation pinned hashing to Python's `hashlib.sha256`
+because it gave us SHA-NI / ARMv8 acceleration for free. The trade-
+off: every worker had to cross the Python boundary, so we couldn't
+use Mojo's native `parallelize` (libpython aborts under multiple
+worker threads holding Python objects). Now that hashing is in pure
+Mojo and reads go through `std.pathlib`, parallelize is safe and the
+worker pool is one stdlib call away.
+
+Hashes are emitted as 16-char lowercase hex (UInt64 → hex). The
+SQLite store keys on this string, so width doesn't matter as long
+as it's stable.
 """
 
-from std.python import PythonObject, Python
+from std.algorithm import parallelize
+from std.hashlib.hash import hash
+from std.os.path import join
+from std.pathlib import Path
 
 
 @fieldwise_init
@@ -28,15 +37,24 @@ struct FileHash(Copyable, Movable):
     var mtime_ms: Int
 
 
+def hex_u64(value: UInt64) -> String:
+    """Format a 64-bit hash as 16 lowercase hex chars."""
+    var digits: StaticString = "0123456789abcdef"
+    var out = String("")
+    var i = 16
+    while i > 0:
+        i -= 1
+        var shift = UInt64(i * 4)
+        var nibble = Int((value >> shift) & UInt64(15))
+        out += String(digits[byte=nibble])
+    return out^
+
+
 def hash_one(project_root: String, rel: String) raises -> String:
-    """Hex SHA-256 of one file's contents."""
-    var hashlib = Python.import_module("hashlib")
-    var pathlib = Python.import_module("pathlib")
-    var os_mod = Python.import_module("os")
-    var abs = os_mod.path.join(project_root, rel)
-    var data = pathlib.Path(abs).read_bytes()
-    var h = hashlib.sha256(data)
-    return String(py=h.hexdigest())
+    """Hex hash of one file's contents."""
+    var abs_path = join(project_root, rel)
+    var content = Path(abs_path).read_text()
+    return hex_u64(UInt64(hash(content)))
 
 
 def hash_many(
@@ -45,45 +63,36 @@ def hash_many(
     sizes: List[Int],
     mtimes: List[Int],
 ) raises -> List[FileHash]:
-    """Hash a batch of files. Parallelism is delegated to a Python
-    `ThreadPoolExecutor` so the GIL is honored — Mojo `parallelize`
-    over Python calls aborts the process."""
+    """Hash a batch of files in parallel."""
     var n = paths.__len__()
     if n == 0:
         return List[FileHash]()
 
-    var py = Python.import_module("builtins")
-    var futures_mod = Python.import_module("concurrent.futures")
-    var os_mod = Python.import_module("os")
+    # Pre-allocate result slots so workers can fill in by index without
+    # touching shared metadata. Empty string == "this file failed".
+    var hexes = List[String]()
+    for _ in range(n):
+        hexes.append(String(""))
 
-    # Build absolute paths once on the Mojo side so the worker only
-    # crosses the boundary for I/O + hashing.
-    var py_paths = py.list()
-    for i in range(n):
-        py_paths.append(os_mod.path.join(project_root, paths[i]))
+    @parameter
+    def worker(i: Int):
+        try:
+            var abs_path = join(project_root, paths[i])
+            var content = Path(abs_path).read_text()
+            hexes[i] = hex_u64(UInt64(hash(content)))
+        except:
+            # Leave the slot empty; the assembly loop below skips it.
+            pass
 
-    # Worker is a tiny lambda that reads + hashes one path. Defining
-    # it via `Python.evaluate` keeps it in pure Python so the executor
-    # threads never touch the Mojo runtime concurrently.
-    var worker = Python.evaluate(
-        "__import__('functools').partial("
-        "lambda p: __import__('hashlib').sha256("
-        "__import__('pathlib').Path(p).read_bytes()).hexdigest()"
-        ")"
-    )
-    var executor = futures_mod.ThreadPoolExecutor(max_workers=32)
-    var results = py.list(executor.map(worker, py_paths))
-    executor.shutdown(wait=True)
+    parallelize[worker](n)
 
     var out = List[FileHash]()
     for i in range(n):
-        var hex = String(py=results[i])
-        if hex.byte_length() == 0:
-            continue
-        out.append(FileHash(
-            rel_path=paths[i],
-            hex=hex,
-            size=sizes[i],
-            mtime_ms=mtimes[i],
-        ))
+        if hexes[i].byte_length() > 0:
+            out.append(FileHash(
+                rel_path=paths[i],
+                hex=hexes[i].copy(),
+                size=sizes[i],
+                mtime_ms=mtimes[i],
+            ))
     return out^

@@ -80,6 +80,22 @@ export type ProgressFrame = {
   total: number;
 };
 
+/**
+ * Point-in-time timing emitted by the sidecar when a discrete step
+ * finishes. The bench harness collects these per request and renders
+ * them as children under the parent phase record. Steady-state CLI
+ * use ignores them — they have negligible cost when no `onPhase`
+ * handler is registered.
+ */
+export type PhaseFrame = {
+  id: string;
+  type: "phase";
+  name: string;
+  /** Duration in nanoseconds. */
+  ns: number;
+  notes?: string;
+};
+
 export type ResultFrame<T = unknown> = {
   id: string;
   type: "result";
@@ -92,4 +108,4 @@ export type ErrorFrame = {
   error: string;
 };
 
-export type Frame = ProgressFrame | ResultFrame | ErrorFrame;
+export type Frame = ProgressFrame | PhaseFrame | ResultFrame | ErrorFrame;

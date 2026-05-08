@@ -16,13 +16,14 @@ treats them like any HTTP 5xx and may retry.
 
 from std.python import PythonObject, Python
 from std.sys import exit
+from std.time import perf_counter_ns
 
 from protocol import (
     FRAME_RESULT, FRAME_ERROR,
     METHOD_OPEN, METHOD_CLOSE, METHOD_HEALTH,
     METHOD_BUILD_TREE, METHOD_UPDATE_TREE,
     METHOD_APPLY_DIFF, METHOD_SEARCH,
-    emit_frame, read_request,
+    emit_frame, emit_phase, read_request,
 )
 from ignore import IgnoreRules, parse_ignore_text, empty_ignore
 from walk import Profile, walk
@@ -53,7 +54,10 @@ struct Session:
         self.cache_dir = String("")
         self.rules = empty_ignore()
         self.profile = Profile(extensions=List[String](), filenames=List[String]())
-        self.embedder = Embedder()  # loaded eagerly — pays warmup at startup
+        # Construct lazily — `Embedder.__init__` is now a no-op; the heavy
+        # MAX import + graph compile happens on first `embed_*` call (or
+        # eagerly in `_open` if we want to overlap it with file walk).
+        self.embedder = Embedder()
         self.store = ChunkStore(":memory:", self.embedder.dim)
         self.index = VectorIndex(dim=self.embedder.dim)
         self.opened = False
@@ -136,12 +140,30 @@ def _open(mut session: Session, request_id: String, params: PythonObject) raises
     var ignore_text = String(py.str(params.get("ignoreText", "")))
     session.rules = parse_ignore_text(ignore_text)
 
+    # Submit MAX warm-up to a background Python thread so the file
+    # walk + merkle hash stages (which run on the main thread inside
+    # `_update_tree` and don't touch the GIL) can overlap with the
+    # 3–8s of `max.pipelines` imports + graph compile. The actual
+    # `model_import`/`graph_compile` phase frames are still emitted
+    # from inside `_build_pipeline` (it just runs on the worker).
+    var t_submit = perf_counter_ns()
+    session.embedder.warm_async()
+    emit_phase(request_id, String("warm_submit"),
+               perf_counter_ns() - t_submit,
+               String("dispatch to vgrep-warm thread"))
+
     # Reopen the durable store and warm the in-memory index from it.
+    var t_db = perf_counter_ns()
     session.store = ChunkStore(db_path, session.embedder.dim)
     session.index = VectorIndex(dim=session.embedder.dim, initial_capacity=4096)
+    emit_phase(request_id, String("db_open"), perf_counter_ns() - t_db,
+               String("sqlite handle + empty in-mem index"))
+
+    var t_load = perf_counter_ns()
     var rows = session.store.load_all()
     var struct_mod = Python.import_module("struct")
     var fmt = String("<") + String(session.embedder.dim) + String("f")
+    var loaded = 0
     while True:
         try:
             var row = py.next(rows)
@@ -161,8 +183,11 @@ def _open(mut session: Session, request_id: String, params: PythonObject) raises
                 ),
                 vec,
             )
+            loaded += 1
         except:
             break
+    emit_phase(request_id, String("index_load"), perf_counter_ns() - t_load,
+               String(loaded) + String(" cached chunks"))
     session.opened = True
     _emit_result(request_id, _ok())
 
@@ -180,9 +205,23 @@ def _build_tree(session: Session, request_id: String) raises:
 def _update_tree(session: Session, request_id: String, params: PythonObject) raises:
     var py = Python.import_module("builtins")
     var prev = params.get("previous", py.None)
+
+    var t_walk = perf_counter_ns()
     var files = walk(session.project_root, session.profile, session.rules)
+    emit_phase(request_id, String("walk"), perf_counter_ns() - t_walk,
+               String(files.__len__()) + String(" files"))
+
+    var t_build = perf_counter_ns()
     var current = build_tree(session.project_root, files)
+    emit_phase(request_id, String("merkle_build"),
+               perf_counter_ns() - t_build, String(""))
+
+    var t_diff = perf_counter_ns()
     var changes = diff_trees(prev, current)
+    emit_phase(request_id, String("tree_diff"),
+               perf_counter_ns() - t_diff,
+               String(Int(py=py.len(changes))) + String(" changes"))
+
     var payload = py.dict()
     payload["result"] = py.dict()
     payload["result"]["tree"] = current
@@ -212,12 +251,26 @@ def _apply_diff(
     _emit_result_raw(request_id, payload)
 
 
-def _search(session: Session, request_id: String, params: PythonObject) raises:
+def _search(mut session: Session, request_id: String, params: PythonObject) raises:
     var py = Python.import_module("builtins")
     var query = String(py.str(params["query"]))
     var top_k = Int(py=params.get("topK", 10))
+
+    # Join any in-flight async warm so its cost is attributable on its
+    # own, not lumped into `query_embed`.
+    session.embedder.warm(request_id=request_id)
+
+    var t_qe = perf_counter_ns()
     var qvec = session.embedder.embed_one(query)
+    emit_phase(request_id, String("query_embed"), perf_counter_ns() - t_qe,
+               String(query.byte_length()) + String(" bytes"))
+
+    var t_knn = perf_counter_ns()
     var hits = session.index.search(qvec, top_k)
+    emit_phase(request_id, String("knn"), perf_counter_ns() - t_knn,
+               String(hits.__len__()) + String(" hits"))
+
+    var t_marshal = perf_counter_ns()
     var arr = py.list()
     for h in hits:
         var item = py.dict()
@@ -227,6 +280,9 @@ def _search(session: Session, request_id: String, params: PythonObject) raises:
         item["endLine"] = h.meta.end_line
         item["score"] = Float64(h.score)
         arr.append(item)
+    emit_phase(request_id, String("marshal"),
+               perf_counter_ns() - t_marshal, String(""))
+
     var payload = py.dict()
     payload["result"] = py.dict()
     payload["result"]["results"] = arr

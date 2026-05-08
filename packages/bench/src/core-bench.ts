@@ -26,6 +26,7 @@ import {
   resolveProfileFilters,
   SidecarClient,
   readIgnoreText,
+  type PhaseFrame,
   type ProgressFrame,
   type SearchResult,
 } from "@vgrep/core";
@@ -34,7 +35,32 @@ import {
   formatDuration,
   recordsToJson,
   renderReport,
+  type PhaseRecord,
 } from "./timing";
+
+/**
+ * Builds an `onPhase` collector that records every sidecar `phase`
+ * frame into a flat list. The bench harness later attaches that list
+ * as `children` of the parent PhaseRecord so the report renders the
+ * full top-down breakdown — model_warm splits into model_import +
+ * graph_compile, tree splits into walk + merkle_build + tree_diff,
+ * etc.
+ */
+function makePhaseCollector(): {
+  onPhase: (frame: PhaseFrame) => void;
+  drain: () => PhaseRecord[];
+} {
+  const collected: PhaseRecord[] = [];
+  return {
+    onPhase: (frame) =>
+      collected.push({
+        name: frame.name,
+        ns: BigInt(frame.ns),
+        notes: frame.notes,
+      }),
+    drain: () => collected.splice(0, collected.length),
+  };
+}
 
 type Scenario = {
   name: string;
@@ -183,48 +209,59 @@ async function runScenario(
       ["code"],
       DEFAULT_FILE_PROFILES,
     );
+    const openPhases = makePhaseCollector();
     await timer.time(
       "open",
       async () => {
-        await ref.sidecar!.open({
-          projectRoot: sandbox,
-          dbPath: join(sandbox, ".vgrep", "index.db"),
-          cacheDir: join(sandbox, ".vgrep", "cache"),
-          extensions,
-          filenames,
-          ignoreText,
-        });
+        await ref.sidecar!.open(
+          {
+            projectRoot: sandbox,
+            dbPath: join(sandbox, ".vgrep", "index.db"),
+            cacheDir: join(sandbox, ".vgrep", "cache"),
+            extensions,
+            filenames,
+            ignoreText,
+          },
+          { onPhase: openPhases.onPhase },
+        );
       },
       { notes: `profiles=code, ignore=${ignoreText.length}B` },
     );
+    attachChildren(timer, "open", openPhases.drain());
 
     // ── tree ─────────────────────────────────────────────────────
     let fileCount = 0;
     let totalBytes = 0;
-    const update = await timer.time(
-      "tree",
-      () => ref.sidecar!.updateTree({ previous: null }),
+    const treePhases = makePhaseCollector();
+    const update = await timer.time("tree", () =>
+      ref.sidecar!.updateTree(
+        { previous: null },
+        { onPhase: treePhases.onPhase },
+      ),
     );
     fileCount = countFiles(update.tree);
     totalBytes = totalSize(update.tree);
     const lastTree = timer.all().at(-1);
     if (lastTree) lastTree.notes = `${fileCount} files, ${formatBytes(totalBytes)}`;
+    attachChildren(timer, "tree", treePhases.drain());
 
     // ── index (chunk + embed + upsert) ───────────────────────────
     const progress = { chunk: 0, embed: 0, chunkTotal: 0, embedTotal: 0 };
+    const indexPhases = makePhaseCollector();
     const stats = await timer.time(
       "index",
       () =>
         ref.sidecar!.applyDiff(
           { changes: update.changes },
-          (frame: ProgressFrame) => {
-            progress[frame.stage] = frame.done;
-            const totalKey = `${frame.stage}Total` as const;
-            progress[totalKey] = frame.total;
-            // Inline status line so we can see the embed progress
-            // tick by without spamming the report.
-            const tag = `${frame.stage} ${frame.done}/${frame.total}`;
-            process.stdout.write(`\r  ${tag.padEnd(40)}`);
+          {
+            onProgress: (frame: ProgressFrame) => {
+              progress[frame.stage] = frame.done;
+              const totalKey = `${frame.stage}Total` as const;
+              progress[totalKey] = frame.total;
+              const tag = `${frame.stage} ${frame.done}/${frame.total}`;
+              process.stdout.write(`\r  ${tag.padEnd(40)}`);
+            },
+            onPhase: indexPhases.onPhase,
           },
         ),
     );
@@ -233,29 +270,51 @@ async function runScenario(
     if (lastIndex) {
       lastIndex.notes = `${stats.indexedChunks} chunks, ${stats.failedFiles} failed`;
     }
+    attachChildren(timer, "index", indexPhases.drain());
 
     // ── search ───────────────────────────────────────────────────
     // Warmup — first call materializes the query embedding pipeline
-    // and any lazy SIMD codegen. We measure runs 2..N.
+    // and any lazy SIMD codegen. We measure runs 2..N. We collect phase
+    // frames from the timed runs only and average them across runs so
+    // the breakdown matches the reported mean.
     let lastResults: SearchResult[] = [];
     const searchNs: bigint[] = [];
+    const searchPhaseSums = new Map<string, { ns: bigint; count: number; notes?: string }>();
     for (let i = 0; i < SEARCH_RUNS; i++) {
+      const phases = makePhaseCollector();
       const start = Bun.nanoseconds();
-      const r = await ref.sidecar!.search({ query: scenario.query, topK: opts.topK });
+      const r = await ref.sidecar!.search(
+        { query: scenario.query, topK: opts.topK },
+        { onPhase: phases.onPhase },
+      );
       const ns = BigInt(Bun.nanoseconds() - start);
-      if (i > 0) searchNs.push(ns);
+      if (i > 0) {
+        searchNs.push(ns);
+        for (const p of phases.drain()) {
+          const slot = searchPhaseSums.get(p.name) ?? { ns: 0n, count: 0, notes: p.notes };
+          slot.ns += p.ns;
+          slot.count += 1;
+          searchPhaseSums.set(p.name, slot);
+        }
+      }
       lastResults = r.results;
     }
     const searchSummary = summarizeSearch(searchNs);
+    const searchChildren: PhaseRecord[] = Array.from(searchPhaseSums, ([name, v]) => ({
+      name,
+      ns: v.count > 0 ? v.ns / BigInt(v.count) : 0n,
+      notes: v.notes,
+    }));
+    searchChildren.push(
+      { name: "p50", ns: percentile(searchNs, 0.5) },
+      { name: "p90", ns: percentile(searchNs, 0.9) },
+      { name: "max", ns: searchNs.reduce((a, b) => (b > a ? b : a), 0n) },
+    );
     timer.attach(
       "search",
       meanNs(searchNs),
       `mean of ${searchNs.length} runs (1 warmup discarded)`,
-      [
-        { name: "p50", ns: percentile(searchNs, 0.5) },
-        { name: "p90", ns: percentile(searchNs, 0.9) },
-        { name: "max", ns: searchNs.reduce((a, b) => (b > a ? b : a), 0n) },
-      ],
+      searchChildren,
     );
 
     // ── report ───────────────────────────────────────────────────
@@ -313,6 +372,22 @@ async function runScenario(
 }
 
 // ── helpers ──────────────────────────────────────────────────────
+
+/** Attach collected sub-phases to the most recent record matching `parent`. */
+function attachChildren(
+  timer: PhaseTimer,
+  parent: string,
+  children: PhaseRecord[],
+): void {
+  if (children.length === 0) return;
+  const records = timer.all();
+  for (let i = records.length - 1; i >= 0; i--) {
+    if (records[i]!.name === parent) {
+      records[i]!.children = children;
+      return;
+    }
+  }
+}
 
 function flagValue(args: string[], flag: string): string | undefined {
   const i = args.indexOf(flag);

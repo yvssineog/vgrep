@@ -6,6 +6,7 @@ import {
   readIgnoreText,
   resolveProfileFilters,
   SidecarClient,
+  sidecarEnv as buildSidecarEnv,
   type VgrepConfig,
 } from "@vgrep/core";
 import { c, Chronometer, formatDuration, header, row } from "../style";
@@ -97,7 +98,7 @@ export async function initCommand(options: {
 
     const sidecar = new SidecarClient({
       projectRoot,
-      env: sidecarEnv(firstEverRun),
+      env: buildSidecarEnv(firstEverRun),
     });
     chrono.setStage("starting sidecar...");
     const sidecarT0 = performance.now();
@@ -137,25 +138,6 @@ export async function initCommand(options: {
   }
 }
 
-function sidecarEnv(firstRun: boolean): Record<string, string> {
-  // Pin HF + transformers cache under ~/.vgrep so the model is downloaded
-  // once globally (not per-project) and quiet the noisy progress bars on
-  // every spawn — first-run downloads still get rendered.
-  const env: Record<string, string> = {
-    HF_HOME: MODEL_DIR,
-    HF_HUB_CACHE: MODEL_DIR,
-    TRANSFORMERS_CACHE: MODEL_DIR,
-    SENTENCE_TRANSFORMERS_HOME: MODEL_DIR,
-    TRANSFORMERS_VERBOSITY: "error",
-    TRANSFORMERS_NO_ADVISORY_WARNINGS: "1",
-    TOKENIZERS_PARALLELISM: "false",
-  };
-  if (!firstRun) {
-    env.HF_HUB_DISABLE_PROGRESS_BARS = "1";
-    env.HF_HUB_DISABLE_TELEMETRY = "1";
-  }
-  return env;
-}
 
 async function detectRunningDaemon(projectRoot: string): Promise<number | null> {
   const pidPath = join(vgrepDir(projectRoot), FILES.daemonPid);
